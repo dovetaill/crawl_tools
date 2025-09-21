@@ -101,6 +101,33 @@ curl --user "your_crawl4ai_username:your_crawl4ai_passwd" \
 
 ---
 
+## 🛡️ 验证 WARP 网络出口是否生效
+
+这是**关键的验证步骤**，用于确认所有服务的出口流量都通过 WARP 网络，从而隐藏了服务器的真实 IP。
+
+**第 1 步：获取服务器的本机公网 IP**
+
+在您的服务器上直接运行此命令，记下返回的 IP 地址。这是您服务器的真实 IP。
+
+```bash
+curl ip.gs
+```
+
+**第 2 步：获取容器的出口公网 IP**
+
+此命令会进入 `aio-flaresolverr` 容器内部，查询它访问外部网络时所使用的 IP 地址。
+
+```bash
+docker exec aio-flaresolverr curl -s ip.gs
+```
+
+**第 3 步：对比结果**
+
+*   ✅ **成功**: 如果**两个 IP 地址不同**，恭喜您，配置完全正确！所有服务的流量都已成功通过 WARP 路由。
+*   ❌ **失败**: 如果**两个 IP 地址相同**，说明网络配置存在问题，服务的流量仍然在使用服务器的本机 IP。请检查 `docker-compose.yml` 文件中的 `network_mode: "service:warp"` 配置是否正确。
+
+---
+
 ## 🛠️ 日常服务管理
 
 所有管理命令都需要在安装目录 `/opt/aio_proxy` 下执行。
