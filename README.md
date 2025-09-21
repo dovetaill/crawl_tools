@@ -29,6 +29,11 @@
 *   一台拥有 `root` 权限的 Linux 服务器。
 *   已安装 Docker 和 Docker Compose (推荐 v2 版本，即 `docker compose`)。
 
+*   Docker 一键安装优化指令
+```bash
+curl -sL https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/main/install_docker.sh | sudo bash
+```
+
 ---
 
 ## 🚀 一键安装指令
