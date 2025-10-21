@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AIO Proxy v6.2 - FlareSolverr + Crawl4AI + Cloudflare WARP (egress only)
+# AIO Proxy v6.2 (no-healthcheck) - FlareSolverr + Crawl4AI + Cloudflare WARP (egress only)
 # 2025-10-21
 set -euo pipefail
 
@@ -207,7 +207,7 @@ networks:
     name: aio-proxy-net
 EOF
 
-# ===== docker-compose.warp.yml（warp 明确加入 backend，含健康检查）=====
+# ===== docker-compose.warp.yml（无 healthcheck，简单依赖）=====
 cat > "${APP_DIR}/docker-compose.warp.yml" <<'EOF'
 services:
   warp:
@@ -224,26 +224,17 @@ services:
       - HTTP_PORT=8080
       - SOCKS5_PORT=1080
       - WGCF_LICENSE_KEY=${WARP_PLUS_KEY}
-    # 健康检查：尽量用容器自带的 wget/curl；若镜像变动导致缺失，可改为 nc 或 /proc/net/tcp 检测
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080 >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080 >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 10s
     networks: [ backend ]
 
   flaresolverr:
     depends_on:
-      warp:
-        condition: service_healthy
+      - warp
     environment:
       - PROXY_URL=http://warp:8080
 
   crawl4ai:
     depends_on:
-      warp:
-        condition: service_healthy
+      - warp
     environment:
       - HTTP_PROXY=http://warp:8080
       - HTTPS_PROXY=http://warp:8080
@@ -283,7 +274,7 @@ compose_with_warp=($COMPOSE_BIN -f docker-compose.yml -f docker-compose.warp.yml
 
 ensure_external_net() {
   docker network inspect "${NET_NAME}" >/dev/null 2>&1 || \
-  docker network create --driver bridge "${NET_NAME}" >/dev/null
+  docker network create --driver bridge "${NET_NAME}" >/devnull 2>&1 || true
 }
 
 case "${1:-start}" in
@@ -364,66 +355,90 @@ else
   ${COMPOSE_BIN} -f docker-compose.yml up -d
 fi
 
-# ===== 自动检测 WARP；不可用则自动回退为直连（修复竞态与探活）=====
-auto_warp_check_and_fallback() {
+# ===== 公网 IP 提取工具（优先取 IPv4，取不到再取 IPv6）=====
+parse_first_ip() {
+  # 从标准输入提取第一个 IP（IPv4 优先，退化到 IPv6）
+  local s
+  s="$(cat || true)"
+  # 优先提取 IPv4
+  local v4
+  v4="$(printf "%s" "$s" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)"
+  if [ -n "$v4" ]; then
+    printf "%s" "$v4"
+    return 0
+  fi
+  # 退化提取 IPv6（宽松匹配）
+  local v6
+  v6="$(printf "%s" "$s" | grep -Eo '([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}' | head -n1 || true)"
+  if [ -n "$v6" ]; then
+    printf "%s" "$v6"
+    return 0
+  fi
+  return 1
+}
+
+get_public_ip_host() {
+  # 取宿主公网 IP（不走代理）
+  curl -sS -A Mozilla --max-time 5 https://api.ip.sb/ip | parse_first_ip || true
+}
+
+get_public_ip_via_warp_proxy() {
+  # 通过 warp HTTP 代理从同一 docker 网络里取公网 IP
+  # 首次会拉取 curl 镜像，如不想拉镜像，请替换为你宿主已有的 curl 容器/镜像
+  docker run --rm --network "${NET_NAME}" curlimages/curl:8.8.0 \
+    -sS -A Mozilla --max-time 5 -x http://warp:8080 https://api.ip.sb/ip | parse_first_ip || true
+}
+
+# ===== 安装期：自动检测 WARP（对比 IP），失败则自动回退 =====
+auto_warp_check_and_fallback_ip() {
   cd "${APP_DIR}"
   if [ "${WARP_ENABLED}" != "true" ]; then
     echo "[auto] WARP disabled by user choice; skip checking."
     return 0
   fi
 
-  echo "[auto] checking warp reachability..."
-  local ok=0
+  echo "[auto] checking WARP egress by comparing public IPs..."
+  # 先拿宿主公网 IP
+  local host_ip warp_ip ok=0
+  host_ip="$(get_public_ip_host || true)"
+  echo "[auto] host public IP: ${host_ip:-<empty>}"
 
-  # 最多 45 次 * 2s ≈ 90 秒，给首次注册/握手留足缓冲
-  for try in $(seq 1 45); do
+  # 给容器几秒初始化时间
+  sleep 6
+
+  # 最多 20 次，每次间隔 3 秒（≈60s 窗口）
+  for try in $(seq 1 20); do
     echo "[auto] try #$try ..."
+    warp_ip="$(get_public_ip_via_warp_proxy || true)"
+    echo "[auto] warp(proxied) IP: ${warp_ip:-<empty>}"
 
-    # 用 compose 的 label 找容器，避免依赖项目名/目录名
-    local warp_id
-    warp_id="$(docker ps -q --filter "label=com.docker.compose.service=warp" || true)"
-
-    if [ -n "$warp_id" ]; then
-      # 取 IP（多网络时取第一个）
-      local warp_ip
-      warp_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$warp_id" 2>/dev/null | awk '{print $1}')"
-
-      if [ -n "${warp_ip}" ]; then
-        # A) 纯 TCP 探测：能建连就算可达（不依赖 HTTP）
-        if timeout 2 bash -lc "exec 3<>/dev/tcp/${warp_ip}/8080" 2>/dev/null; then
-          ok=1; break
-        fi
-        # B) 普通 GET（避免 -I/HEAD 带来的实现差异）
-        curl -sS --connect-timeout 2 "http://${warp_ip}:8080" >/dev/null 2>&1 && { ok=1; break; }
-      fi
-
-      # C) 在同一网络内用服务名直连（无需知道 IP）
-      # （第一次会拉取小镜像 curlimages/curl，如不想拉可注释掉）
-      docker run --rm --network "${NET_NAME}" curlimages/curl:8.8.0 \
-        -sS --connect-timeout 2 "http://warp:8080" >/dev/null 2>&1 && { ok=1; break; }
+    # 判定：warp_ip 非空 且（host_ip 为空 或 warp_ip != host_ip）视为成功
+    if [ -n "${warp_ip:-}" ] && { [ -z "${host_ip:-}" ] || [ "${warp_ip}" != "${host_ip}" ]; }; then
+      ok=1
+      echo "[auto] WARP egress looks active (IP differs)."
+      break
     fi
-
-    sleep 2
+    sleep 3
   done
 
   if [ "$ok" -eq 0 ]; then
-    echo "[auto] warp seems unreachable; turning it OFF and restarting without warp..."
+    echo "[auto] WARP egress check failed; switching OFF and restarting without WARP..."
     sed -i "s/^WARP_ENABLED=.*/WARP_ENABLED=false/" .env
     ${COMPOSE_BIN} -f docker-compose.yml -f docker-compose.warp.yml down || true
     ${COMPOSE_BIN} -f docker-compose.yml up -d
     echo "[auto] fallback done. You can later enable with: cd ${APP_DIR} && ./manage.sh warp on"
   else
-    echo "[auto] warp looks reachable."
+    echo "[auto] WARP OK."
   fi
 }
-auto_warp_check_and_fallback
+auto_warp_check_and_fallback_ip
 
 echo
-echo "==================== 安装完成 (v6.2) ===================="
+echo "==================== 安装完成 (v6.2 no-healthcheck) ===================="
 echo "FlareSolverr ： http://<服务器>:${FLARE_PORT}    （BasicAuth）"
 echo "Crawl4AI     ： http://<服务器>:${C4AI_PORT}     （/playground，BasicAuth）"
 echo "WARP 状态    ： $(grep '^WARP_ENABLED=' ${ENV_FILE} | cut -d= -f2)  （切换：cd ${APP_DIR} && ./manage.sh warp on|off）"
 echo "改密码       ： cd ${APP_DIR} && ./manage.sh set-credentials flaresolverr <user> <pass>"
 echo "               cd ${APP_DIR} && ./manage.sh set-credentials crawl4ai    <user> <pass>"
 echo "查看日志     ： cd ${APP_DIR} && ./manage.sh logs"
-echo "======================================================="
+echo "======================================================================="
