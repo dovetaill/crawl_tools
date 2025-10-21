@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AIO Proxy v6.1 - FlareSolverr + Crawl4AI + Cloudflare WARP (egress only)
+# AIO Proxy v6.2 - FlareSolverr + Crawl4AI + Cloudflare WARP (egress only)
 # 2025-10-21
 set -euo pipefail
 
@@ -90,7 +90,7 @@ detect_compose_bin() {
 COMPOSE_BIN="$(detect_compose_bin)"
 
 # ===== 依赖 =====
-apt_run install apache2-utils
+apt_run install apache2-utils curl
 
 # ===== 目录与凭据（bcrypt htpasswd）=====
 mkdir -p "${APP_DIR}" "${NGX_DIR}"
@@ -117,7 +117,6 @@ EOF
 
 # ===== Nginx 配置 =====
 cat > "${NGX_DIR}/nginx.conf" <<'EOF'
-# 不显式指定 user，以兼容不同镜像用户
 worker_processes auto;
 
 events { worker_connections 1024; }
@@ -208,7 +207,7 @@ networks:
     name: aio-proxy-net
 EOF
 
-# ===== docker-compose.warp.yml（warp 明确加入 backend）=====
+# ===== docker-compose.warp.yml（warp 明确加入 backend，含健康检查）=====
 cat > "${APP_DIR}/docker-compose.warp.yml" <<'EOF'
 services:
   warp:
@@ -225,15 +224,26 @@ services:
       - HTTP_PORT=8080
       - SOCKS5_PORT=1080
       - WGCF_LICENSE_KEY=${WARP_PLUS_KEY}
+    # 健康检查：尽量用容器自带的 wget/curl；若镜像变动导致缺失，可改为 nc 或 /proc/net/tcp 检测
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080 >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     networks: [ backend ]
 
   flaresolverr:
-    depends_on: [ warp ]
+    depends_on:
+      warp:
+        condition: service_healthy
     environment:
       - PROXY_URL=http://warp:8080
 
   crawl4ai:
-    depends_on: [ warp ]
+    depends_on:
+      warp:
+        condition: service_healthy
     environment:
       - HTTP_PROXY=http://warp:8080
       - HTTPS_PROXY=http://warp:8080
@@ -295,15 +305,22 @@ case "${1:-start}" in
   restart)
     "$0" stop; "$0" start;;
   ps|status)
-    "${compose_base[@]}" ps;;
+    # 显示所有可能的服务，避免漏看 warp
+    "${compose_with_warp[@]}" ps;;
   logs)
-    "${compose_base[@]}" logs -f --tail=200;;
+    # 根据当前 .env 中的开关选择日志集合
+    if [ "${WARP_ENABLED:-false}" = "true" ]; then
+      "${compose_with_warp[@]}" logs -f --tail=200
+    else
+      "${compose_base[@]}" logs -f --tail=200
+    fi
+    ;;
   warp)
     # ./manage.sh warp on|off
     shift || true
     want="${1:-}"
     case "$want" in
-      on|enable|true)  sed -i 's/^WARP_ENABLED=.*/WARP_ENABLED=true/' .env ;;
+      on|enable|true)   sed -i 's/^WARP_ENABLED=.*/WARP_ENABLED=true/' .env ;;
       off|disable|false) sed -i 's/^WARP_ENABLED=.*/WARP_ENABLED=false/' .env ;;
       *) echo "用法: $0 warp {on|off}"; exit 1;;
     esac
@@ -347,7 +364,7 @@ else
   ${COMPOSE_BIN} -f docker-compose.yml up -d
 fi
 
-# ===== 安装期：自动检测 WARP；不可用则自动回退为直连 =====
+# ===== 自动检测 WARP；不可用则自动回退为直连（修复竞态与探活）=====
 auto_warp_check_and_fallback() {
   cd "${APP_DIR}"
   if [ "${WARP_ENABLED}" != "true" ]; then
@@ -356,19 +373,36 @@ auto_warp_check_and_fallback() {
   fi
 
   echo "[auto] checking warp reachability..."
-  # 找 warp 容器 IP（同一网络）
-  local warp_id warp_ip ok=0
-  warp_id="$(docker ps --filter "name=warp" --filter "name=aio-proxy" --format '{{.ID}}' | head -n1 || true)"
-  if [ -n "${warp_id}" ]; then
-    warp_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$warp_id" 2>/dev/null || true)"
-  fi
+  local ok=0
 
-  # 允许 warp 初始化，做多次探测（约 30s）
-  for try in $(seq 1 15); do
+  # 最多 45 次 * 2s ≈ 90 秒，给首次注册/握手留足缓冲
+  for try in $(seq 1 45); do
     echo "[auto] try #$try ..."
-    if [ -n "${warp_ip:-}" ]; then
-      curl -sI --connect-timeout 2 "http://${warp_ip}:8080" >/dev/null 2>&1 && { ok=1; break; }
+
+    # 用 compose 的 label 找容器，避免依赖项目名/目录名
+    local warp_id
+    warp_id="$(docker ps -q --filter "label=com.docker.compose.service=warp" || true)"
+
+    if [ -n "$warp_id" ]; then
+      # 取 IP（多网络时取第一个）
+      local warp_ip
+      warp_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$warp_id" 2>/dev/null | awk '{print $1}')"
+
+      if [ -n "${warp_ip}" ]; then
+        # A) 纯 TCP 探测：能建连就算可达（不依赖 HTTP）
+        if timeout 2 bash -lc "exec 3<>/dev/tcp/${warp_ip}/8080" 2>/dev/null; then
+          ok=1; break
+        fi
+        # B) 普通 GET（避免 -I/HEAD 带来的实现差异）
+        curl -sS --connect-timeout 2 "http://${warp_ip}:8080" >/dev/null 2>&1 && { ok=1; break; }
+      fi
+
+      # C) 在同一网络内用服务名直连（无需知道 IP）
+      # （第一次会拉取小镜像 curlimages/curl，如不想拉可注释掉）
+      docker run --rm --network "${NET_NAME}" curlimages/curl:8.8.0 \
+        -sS --connect-timeout 2 "http://warp:8080" >/dev/null 2>&1 && { ok=1; break; }
     fi
+
     sleep 2
   done
 
@@ -385,10 +419,11 @@ auto_warp_check_and_fallback() {
 auto_warp_check_and_fallback
 
 echo
-echo "==================== 安装完成 (v6.1) ===================="
+echo "==================== 安装完成 (v6.2) ===================="
 echo "FlareSolverr ： http://<服务器>:${FLARE_PORT}    （BasicAuth）"
 echo "Crawl4AI     ： http://<服务器>:${C4AI_PORT}     （/playground，BasicAuth）"
 echo "WARP 状态    ： $(grep '^WARP_ENABLED=' ${ENV_FILE} | cut -d= -f2)  （切换：cd ${APP_DIR} && ./manage.sh warp on|off）"
 echo "改密码       ： cd ${APP_DIR} && ./manage.sh set-credentials flaresolverr <user> <pass>"
 echo "               cd ${APP_DIR} && ./manage.sh set-credentials crawl4ai    <user> <pass>"
+echo "查看日志     ： cd ${APP_DIR} && ./manage.sh logs"
 echo "======================================================="
