@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AIO Proxy v6 - FlareSolverr + Crawl4AI + Cloudflare WARP(egress only)
+# AIO Proxy v6.1 - FlareSolverr + Crawl4AI + Cloudflare WARP (egress only)
 # 2025-10-21
 set -euo pipefail
 
@@ -30,19 +30,39 @@ HT_FLARE="${NGX_DIR}/htpasswd_flaresolverr"
 HT_C4AI="${NGX_DIR}/htpasswd_crawl4ai"
 ENV_FILE="${APP_DIR}/.env"
 TZ_DEFAULT="Europe/Berlin"
-NET_NAME="aio-proxy-net"  # 统一使用 external 网络，避免 compose 标签冲突
+NET_NAME="aio-proxy-net"  # external 网络，所有容器加入
+
+# ===== APT 锁等待 & 包管理辅助 =====
+apt_wait_lock() {
+  local lock="/var/lib/dpkg/lock-frontend"
+  local i=0
+  echo "[apt] waiting for dpkg lock if needed..."
+  while fuser "$lock" >/dev/null 2>&1; do
+    i=$((i+1))
+    if [ $i -gt 300 ]; then
+      echo "[apt] waited >300s for lock; still locked by other process."
+      return 1
+    fi
+    sleep 1
+  done
+  return 0
+}
+apt_run() {
+  apt_wait_lock || true
+  DEBIAN_FRONTEND=noninteractive apt-get -y "$@"
+}
 
 # ===== Docker 安装/启动 =====
 if ! command -v docker >/dev/null 2>&1; then
-  apt-get update -y
-  apt-get install -y ca-certificates curl gnupg lsb-release
+  apt_run update
+  apt_run install ca-certificates curl gnupg lsb-release
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
     > /etc/apt/sources.list.d/docker.list
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt_run update
+  apt_run install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 # 启动 docker 服务
 if command -v systemctl >/dev/null 2>&1; then
@@ -58,8 +78,8 @@ detect_compose_bin() {
   elif command -v docker-compose >/dev/null 2>&1; then
     echo "docker-compose"
   else
-    apt-get update -y
-    apt-get install -y docker-compose-plugin || true
+    apt_run update
+    apt_run install docker-compose-plugin || true
     if docker compose version >/dev/null 2>&1; then
       echo "docker compose"
     else
@@ -70,7 +90,7 @@ detect_compose_bin() {
 COMPOSE_BIN="$(detect_compose_bin)"
 
 # ===== 依赖 =====
-apt-get install -y apache2-utils >/dev/null
+apt_run install apache2-utils
 
 # ===== 目录与凭据（bcrypt htpasswd）=====
 mkdir -p "${APP_DIR}" "${NGX_DIR}"
@@ -252,10 +272,8 @@ compose_base=($COMPOSE_BIN -f docker-compose.yml)
 compose_with_warp=($COMPOSE_BIN -f docker-compose.yml -f docker-compose.warp.yml)
 
 ensure_external_net() {
-  # external 网络由我们自己创建；存在则复用
-  if ! docker network inspect "${NET_NAME}" >/dev/null 2>&1; then
-    docker network create --driver bridge "${NET_NAME}" >/dev/null
-  fi
+  docker network inspect "${NET_NAME}" >/dev/null 2>&1 || \
+  docker network create --driver bridge "${NET_NAME}" >/dev/null
 }
 
 case "${1:-start}" in
@@ -317,10 +335,11 @@ esac
 EOF
 chmod +x "${APP_DIR}/manage.sh"
 
-# ===== external 网络兜底 & 启动 =====
+# ===== external 网络兜底 =====
 docker network inspect "${NET_NAME}" >/dev/null 2>&1 || \
 docker network create --driver bridge "${NET_NAME}" >/dev/null
 
+# ===== 启动（按 .env 的 WARP_ENABLED）=====
 cd "${APP_DIR}"
 if [ "${WARP_ENABLED}" = "true" ]; then
   ${COMPOSE_BIN} -f docker-compose.yml -f docker-compose.warp.yml up -d
@@ -328,11 +347,48 @@ else
   ${COMPOSE_BIN} -f docker-compose.yml up -d
 fi
 
+# ===== 安装期：自动检测 WARP；不可用则自动回退为直连 =====
+auto_warp_check_and_fallback() {
+  cd "${APP_DIR}"
+  if [ "${WARP_ENABLED}" != "true" ]; then
+    echo "[auto] WARP disabled by user choice; skip checking."
+    return 0
+  fi
+
+  echo "[auto] checking warp reachability..."
+  # 找 warp 容器 IP（同一网络）
+  local warp_id warp_ip ok=0
+  warp_id="$(docker ps --filter "name=warp" --filter "name=aio-proxy" --format '{{.ID}}' | head -n1 || true)"
+  if [ -n "${warp_id}" ]; then
+    warp_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$warp_id" 2>/dev/null || true)"
+  fi
+
+  # 允许 warp 初始化，做多次探测（约 30s）
+  for try in $(seq 1 15); do
+    echo "[auto] try #$try ..."
+    if [ -n "${warp_ip:-}" ]; then
+      curl -sI --connect-timeout 2 "http://${warp_ip}:8080" >/dev/null 2>&1 && { ok=1; break; }
+    fi
+    sleep 2
+  done
+
+  if [ "$ok" -eq 0 ]; then
+    echo "[auto] warp seems unreachable; turning it OFF and restarting without warp..."
+    sed -i "s/^WARP_ENABLED=.*/WARP_ENABLED=false/" .env
+    ${COMPOSE_BIN} -f docker-compose.yml -f docker-compose.warp.yml down || true
+    ${COMPOSE_BIN} -f docker-compose.yml up -d
+    echo "[auto] fallback done. You can later enable with: cd ${APP_DIR} && ./manage.sh warp on"
+  else
+    echo "[auto] warp looks reachable."
+  fi
+}
+auto_warp_check_and_fallback
+
 echo
-echo "==================== 安装完成 (v6) ===================="
+echo "==================== 安装完成 (v6.1) ===================="
 echo "FlareSolverr ： http://<服务器>:${FLARE_PORT}    （BasicAuth）"
 echo "Crawl4AI     ： http://<服务器>:${C4AI_PORT}     （/playground，BasicAuth）"
-echo "WARP 状态    ： ${WARP_ENABLED}  （切换：cd ${APP_DIR} && ./manage.sh warp on|off）"
+echo "WARP 状态    ： $(grep '^WARP_ENABLED=' ${ENV_FILE} | cut -d= -f2)  （切换：cd ${APP_DIR} && ./manage.sh warp on|off）"
 echo "改密码       ： cd ${APP_DIR} && ./manage.sh set-credentials flaresolverr <user> <pass>"
 echo "               cd ${APP_DIR} && ./manage.sh set-credentials crawl4ai    <user> <pass>"
 echo "======================================================="
