@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# AIO Proxy v6.3 (selective services) - FlareSolverr + Crawl4AI + Cloudflare WARP (egress only)
-# 2025-10-21
+# AIO Proxy v6.4 - FlareSolverr + Crawl4AI + Cloudflare WARP (egress only)
+# - Fix: Nginx startup failure when only one upstream is running (use resolver+variable proxy_pass)
+# - Features: SERVICE_MODE (both|flare|crawl), WARP auto-fallback, APT lock wait, external network
+# 2025-10-22
 set -euo pipefail
 
 # ===== 参数校验 =====
-# 新增第 9 个参数：SERVICE_MODE（both|flare|crawl），默认 both
+# 第 9 个参数：SERVICE_MODE（both|flare|crawl），默认 both
 if [ "$#" -lt 7 ] || [ "$#" -gt 9 ]; then
   echo "用法: $0 <FLARE_USER> <FLARE_PASS> <FLARE_PORT> <C4AI_USER> <C4AI_PASS> <C4AI_PORT> <WARP_ON> [WARP_PLUS_KEY] [SERVICE_MODE]"
   echo "示例(两者+WARP on): $0 u1 p1 36584 u2 p2 36585 on"
-  echo "示例(仅 FlareSolverr): $0 u1 p1 36584 u2 p2 36585 off '' flare"
-  echo "示例(仅 Crawl4AI):    $0 u1 p1 36584 u2 p2 36585 off '' crawl"
+  echo "示例(仅 Flare):    $0 u1 p1 36584 u2 p2 36585 off '' flare"
+  echo "示例(仅 Crawl):    $0 u1 p1 36584 u2 p2 36585 off '' crawl"
   exit 1
 fi
 FLARE_USER="$1"; FLARE_PASS="$2"; FLARE_PORT="$3"
 C4AI_USER="$4";  C4AI_PASS="$5";  C4AI_PORT="$6"
 WARP_SWITCH_RAW="$7"
 WARP_PLUS_KEY="${8-}"
-SERVICE_MODE_RAW="${9:-both}"    # 【新增】
+SERVICE_MODE_RAW="${9:-both}"
 
 normalize_bool() {
   case "$(echo "$1" | tr '[:upper:]' '[:lower:]')" in
@@ -25,7 +27,7 @@ normalize_bool() {
     *) echo "false" ;;
   esac
 }
-normalize_mode() {               # 【新增】服务模式归一化
+normalize_mode() {
   case "$(echo "${1:-both}" | tr '[:upper:]' '[:lower:]')" in
     flare|flaresolverr) echo "flare" ;;
     crawl|crawl4ai)     echo "crawl" ;;
@@ -35,7 +37,7 @@ normalize_mode() {               # 【新增】服务模式归一化
 }
 
 WARP_ENABLED="$(normalize_bool "$WARP_SWITCH_RAW")"
-SERVICE_MODE="$(normalize_mode "$SERVICE_MODE_RAW")"   # 【新增】
+SERVICE_MODE="$(normalize_mode "$SERVICE_MODE_RAW")"
 
 # ===== 常量 =====
 APP_DIR="/opt/aio-proxy"
@@ -115,12 +117,13 @@ WARP_PLUS_KEY=${WARP_PLUS_KEY:-}
 
 # 服务选择（both|flare|crawl）
 SERVICE_MODE=${SERVICE_MODE}
+
 # 内部端口（容器内固定）
 FLARE_INTERNAL_PORT=8191
 CRAWL4AI_INTERNAL_PORT=11235
 EOF
 
-# ===== Nginx 配置 =====
+# ===== Nginx 配置（使用 resolver + 变量，避免启动期解析失败）=====
 cat > "${NGX_DIR}/nginx.conf" <<'EOF'
 worker_processes auto;
 
@@ -133,19 +136,25 @@ http {
   keepalive_timeout 65;
   server_tokens off;
 
+  # 使用 Docker 内置 DNS，避免启动时解析失败
+  resolver 127.0.0.11 valid=30s ipv6=off;
+
   # FlareSolverr
   server {
     listen 8081;
     auth_basic "Restricted";
     auth_basic_user_file /etc/nginx/htpasswd_flaresolverr;
+
     location / {
+      # 变量化上游：仅在请求时解析 flaresolverr 主机
+      set $flare_upstream "flaresolverr:8191";
       proxy_set_header Host              $host;
       proxy_set_header X-Real-IP         $remote_addr;
       proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
       proxy_http_version 1.1;
       proxy_set_header Connection "";
-      proxy_pass http://flaresolverr:8191/;
+      proxy_pass http://$flare_upstream;
     }
   }
 
@@ -154,20 +163,23 @@ http {
     listen 8082;
     auth_basic "Restricted";
     auth_basic_user_file /etc/nginx/htpasswd_crawl4ai;
+
     location / {
+      # 变量化上游：仅在请求时解析 crawl4ai 主机
+      set $crawl_upstream "crawl4ai:11235";
       proxy_set_header Host              $host;
       proxy_set_header X-Real-IP         $remote_addr;
       proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
       proxy_http_version 1.1;
       proxy_set_header Connection "";
-      proxy_pass http://crawl4ai:11235/;
+      proxy_pass http://$crawl_upstream;
     }
   }
 }
 EOF
 
-# ===== docker-compose.yml（external 网络；移除 edge 的 depends_on 以支持选择性启动）=====
+# ===== docker-compose.yml（external 网络；edge 无 depends_on）=====
 cat > "${APP_DIR}/docker-compose.yml" <<'EOF'
 services:
   flaresolverr:
@@ -192,7 +204,7 @@ services:
   edge:
     image: nginx:alpine
     restart: unless-stopped
-    # （移除 depends_on，便于只启其中一个上游）
+    # 不使用 depends_on，便于选择性只启其中一个上游
     ports:
       - "${FLARE_PUBLIC_PORT}:8081"
       - "${CRAWL4AI_PUBLIC_PORT}:8082"
@@ -210,7 +222,7 @@ networks:
     name: aio-proxy-net
 EOF
 
-# ===== docker-compose.warp.yml（保留业务对 warp 的 depends_on）=====
+# ===== docker-compose.warp.yml（业务容器依赖 warp）=====
 cat > "${APP_DIR}/docker-compose.warp.yml" <<'EOF'
 services:
   warp:
@@ -295,7 +307,6 @@ selected_services() {
     crawl) arr+=(crawl4ai) ;;
     both)  arr+=(flaresolverr crawl4ai) ;;
   esac
-  # 如果需要 WARP，业务容器会通过 depends_on 自动拉起 warp；无需显式添加。
   printf "%s\n" "${arr[@]}"
 }
 
@@ -376,9 +387,9 @@ chmod +x "${APP_DIR}/manage.sh"
 # ===== external 网络兜底 =====
 docker network inspect "${NET_NAME}" >/dev/null 2>&1 || docker network create --driver bridge "${NET_NAME}" >/dev/null
 
-# ===== 选择性启动（按 .env 的 SERVICE_MODE + WARP_ENABLED）=====
+# ===== 选择性启动（按 SERVICE_MODE + WARP_ENABLED）=====
 cd "${APP_DIR}"
-select_services() {            # 与 manage.sh 保持一致
+select_services() {
   case "$(echo "${SERVICE_MODE}" | tr '[:upper:]' '[:lower:]')" in
     flare|flaresolverr) echo "edge flaresolverr" ;;
     crawl|crawl4ai)     echo "edge crawl4ai" ;;
@@ -412,12 +423,10 @@ get_public_ip_via_warp_proxy() {
 # ===== 安装期：自动检测 WARP（对比 IP），失败则自动回退 =====
 auto_warp_check_and_fallback_ip() {
   cd "${APP_DIR}"
-  # 若未开启 WARP 或 SERVICE_MODE 无业务（不会发生）则跳过
   if [ "${WARP_ENABLED}" != "true" ]; then
     echo "[auto] WARP disabled by user choice; skip checking."
     return 0
   fi
-  # 仅当实际启动了 flaresolverr 或 crawl4ai 才有意义
   case "${SERVICE_MODE}" in
     flare|crawl|both) : ;;
     *) echo "[auto] no business service selected; skip checking."; return 0 ;;
@@ -451,7 +460,7 @@ auto_warp_check_and_fallback_ip() {
 auto_warp_check_and_fallback_ip
 
 echo
-echo "==================== 安装完成 (v6.3 selective) ===================="
+echo "==================== 安装完成 (v6.4) ===================="
 echo "FlareSolverr ： http://<服务器>:${FLARE_PORT}    （BasicAuth）"
 echo "Crawl4AI     ： http://<服务器>:${C4AI_PORT}     （/playground，BasicAuth）"
 echo "WARP 状态    ： $(grep '^WARP_ENABLED=' ${ENV_FILE} | cut -d= -f2)"
@@ -460,4 +469,4 @@ echo "改密码       ： cd ${APP_DIR} && ./manage.sh set-credentials flaresolv
 echo "               cd ${APP_DIR} && ./manage.sh set-credentials crawl4ai    <user> <pass>"
 echo "启停/日志    ： cd ${APP_DIR} && ./manage.sh {start|stop|restart|ps|logs}"
 echo "WARP 开关    ： cd ${APP_DIR} && ./manage.sh warp {on|off}"
-echo "==============================================================="
+echo "========================================================"
