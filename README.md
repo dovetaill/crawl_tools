@@ -1,315 +1,295 @@
-# AIO Proxy (FlareSolverr + Crawl4AI + WARP 出站) — README (v6.1)
+# AIO Proxy 参考手册（edge + flaresolverr）
 
-> 方案B：**edge 公网（Nginx 反代 + BasicAuth）**，**WARP 仅出站**。  
-> 一键安装，支持随时开关 WARP、修改密码、验证出口、刷新 WARP IP。  
-> **v6.1 新增：安装期 WARP 自动回退策略**（见下文），确保在受限地区也能顺利完成安装与使用。
+## 1. 概览与能力边界
 
----
+本项目提供一个最小化可运维的代理入口：
 
-## 目录
+- 公网入口：`edge`（`nginx:alpine`）
+- 核心服务：`flaresolverr`（`flaresolverr/flaresolverr:latest`）
+- 认证方式：BasicAuth（bcrypt htpasswd）
+- 编排方式：单一 `docker-compose.yml`
 
-- [架构与组件](#架构与组件)
-- [一键安装](#一键安装)
-- [日常使用（启停、日志、改密、改端口）](#日常使用启停日志改密改端口)
-- [WARP：开/关、重启与刷新出口 IP](#warp开关重启与刷新出口-ip)
-- [校验是否工作正常](#校验是否工作正常)
-  - [校验服务可用性](#校验服务可用性)
-  - [校验是否走 WARP](#校验是否走-warp)
-- [自动回退策略（受限地区友好）](#自动回退策略受限地区友好)
-- [常见问题与排查](#常见问题与排查)
-- [安全建议](#安全建议)
-- [卸载/清理](#卸载清理)
-- [文件结构](#文件结构)
-- [版本信息](#版本信息)
+能力边界：
+
+- 仅包含 `edge + flaresolverr` 两个服务。
+- 仅维护一套单文件编排，不含多文件叠加编排。
+- 安装脚本当前为“参数驱动 + Docker 交互确认”模式。
 
 ---
 
-## 架构与组件
+## 2. 架构与组件说明
 
+```text
+Internet --> edge (BasicAuth, :8081) --> flaresolverr (:8191)
 ```
 
-Internet  <--(BasicAuth)-->  edge(Nginx)  <--内部网-->  flaresolverr
-|                      (8191)
-+------------------>  crawl4ai
-(11235)
-+------------------>  warp (HTTP 8080 / SOCKS5 1080)
+组件说明：
 
-````
-
-- **edge（Nginx, `nginx:alpine`）**：反向代理 + BasicAuth（htpasswd/bcrypt）。  
-- **FlareSolverr（`flaresolverr/flaresolverr:latest`）**：挑战处理；WARP 开启时经 `PROXY_URL=http://warp:8080` 出站。  
-- **Crawl4AI（`unclecode/crawl4ai:latest`）**：API + `/playground`；WARP 开启时经 `HTTP_PROXY/HTTPS_PROXY=http://warp:8080` 出站。  
-- **WARP（`shahradel/cfw-proxy:latest`）**：仅供内部容器使用的上游代理；HTTP:8080 / SOCKS5:1080；支持 Warp+（可选）。  
-- **网络**：统一 external 网络 `aio-proxy-net`（安装时自动创建）。
+- `edge`：对外暴露端口，处理 BasicAuth，反向代理到 `flaresolverr`。
+- `flaresolverr`：处理目标站点请求。
+- `backend` 网络：由 Compose 创建，名称 `aio-proxy-net`，类型 `bridge`。
 
 ---
 
-## 一键安装
+## 3. 快速安装（交互 / 非交互）
 
-> 运行于 Debian 系（root/sudo）。安装路径：`/opt/aio-proxy`。
+### 3.1 前置条件
 
-### 开启 WARP（无 Warp+）
+- Debian/Ubuntu 系统。
+- 使用 `root`，或当前用户具备 `sudo` 能力。
+- 已克隆本仓库并进入目录：`/home/wwwroot/crawl_tools`。
+
+### 3.2 本地执行（推荐）
+
+```bash
+cd /home/wwwroot/crawl_tools
+chmod +x install.sh install_docker.sh
+sudo ./install.sh admin 'StrongPass123' 36584
+```
+
+执行过程中会进入 yes/no 菜单：
+
+- 若未检测到 Docker：默认安装 Docker。
+- 若检测到 Docker：默认不更新 Docker。
+
+### 3.3 非交互执行
+
+按默认策略执行（未安装则安装，已安装则不更新）：
+
+```bash
+sudo ./install.sh --yes admin 'StrongPass123' 36584
+```
+
+强制更新 Docker：
+
+```bash
+sudo ./install.sh --yes --update-docker admin 'StrongPass123' 36584
+```
+
+### 3.4 远程拉取安装脚本（可选）
 
 ```bash
 sudo bash -c '
-  set -e;
-  SCRIPT_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/main/install.sh?v=6.1";
-  SCRIPT_PATH="/tmp/install_aio_proxy.sh";
-  curl -sLf "$SCRIPT_URL" -o "$SCRIPT_PATH";
-  chmod +x "$SCRIPT_PATH";
-  "$SCRIPT_PATH" \
-      "user" "passwd" "1234" \
-      "user" "passwd" "12345" \
-      "on";
-  rm -f "$SCRIPT_PATH";
-'
-````
-
-### 关闭 WARP
-
-```bash
-sudo bash -c '
-  set -e;
-  SCRIPT_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/main/install.sh?v=6.1";
-  SCRIPT_PATH="/tmp/install_aio_proxy.sh";
-  curl -sLf "$SCRIPT_URL" -o "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH";
-  "$SCRIPT_PATH" "user" "passwd" "1234" "user" "passwd" "12345" "off";
-  rm -f "$SCRIPT_PATH";
+  set -e
+  SCRIPT_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/main/install.sh"
+  SCRIPT_PATH="/tmp/install_aio_proxy.sh"
+  curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_PATH"
+  chmod +x "$SCRIPT_PATH"
+  "$SCRIPT_PATH" --yes admin "StrongPass123" 36584
+  rm -f "$SCRIPT_PATH"
 '
 ```
-
-### 开启 WARP（带 Warp+）
-
-```bash
-sudo bash -c '
-  set -e;
-  SCRIPT_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/main/install.sh?v=6.1";
-  SCRIPT_PATH="/tmp/install_aio_proxy.sh";
-  curl -sLf "$SCRIPT_URL" -o "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH";
-  "$SCRIPT_PATH" \
-      "user" "passwd" "1234" \
-      "user" "passwd" "12345" \
-      "on" "YOUR_WARP_PLUS_KEY";
-  rm -f "$SCRIPT_PATH";
-'
-```
-
-**参数**：
-1~3：FlareSolverr 的 `用户名 密码 对外端口`
-4~6：Crawl4AI 的 `用户名 密码 对外端口`
-7：WARP 开关（`on/off/true/false/1/0/yes/no`）
-8：可选 Warp+ License Key（不传=不启用 Warp+）
 
 ---
 
-## 日常使用（启停、日志、改密、改端口）
+## 4. 参数与默认值说明
+
+### 4.1 `install.sh` 参数
+
+```bash
+install.sh [--yes] [--update-docker] <FLARE_USER> <FLARE_PASS> <FLARE_PORT>
+```
+
+参数说明：
+
+- `--yes`：非交互模式，采用默认决策。
+- `--update-docker`：强制执行 Docker 更新。
+- `FLARE_USER`：BasicAuth 用户名。
+- `FLARE_PASS`：BasicAuth 密码。
+- `FLARE_PORT`：对外访问端口（映射到 `edge:8081`）。
+
+### 4.2 默认值（脚本生成）
+
+- 安装目录：`/opt/aio-proxy`
+- 默认时区：`Europe/Berlin`
+- 容器内部端口：`8191`
+- Compose 网络名：`aio-proxy-net`
+
+### 4.3 帮助命令
+
+```bash
+bash install.sh --help
+bash install_docker.sh --help
+```
+
+---
+
+## 5. 交互菜单说明（方向键 + 回退）
+
+`install.sh` 的确认菜单支持：
+
+- `↑/↓`：切换选项
+- `Enter`：确认
+- `q`：退出安装
+
+当当前终端不支持菜单渲染时，会回退为数字输入：
+
+- `1` 表示 `yes`
+- `2` 表示 `no`
+- `q` 退出
+
+---
+
+## 6. 日常运维
+
+安装完成后，进入工作目录：
 
 ```bash
 cd /opt/aio-proxy
+```
 
-# 启停与状态
+常用命令：
+
+```bash
 ./manage.sh start
 ./manage.sh stop
 ./manage.sh restart
 ./manage.sh ps
 ./manage.sh logs
+```
 
-# 修改 BasicAuth（加密写入 htpasswd，热重启 edge）
-./manage.sh set-credentials flaresolverr NEW_USER NEW_PASS
-./manage.sh set-credentials crawl4ai    NEW_USER NEW_PASS
+修改 BasicAuth：
 
-# 修改对外端口
-nano .env     # 改 FLARE_PUBLIC_PORT / CRAWL4AI_PUBLIC_PORT
+```bash
+./manage.sh set-credentials NEW_USER NEW_PASS
+```
+
+修改对外端口：
+
+```bash
+sed -i 's/^FLARE_PUBLIC_PORT=.*/FLARE_PUBLIC_PORT=36585/' .env
 ./manage.sh restart
 ```
 
 ---
 
-## WARP：开关、重启与刷新出口 IP
+## 7. 验证与联调命令
+
+### 7.1 容器状态与日志
 
 ```bash
 cd /opt/aio-proxy
-
-# 开/关 WARP（自动重启全栈）
-./manage.sh warp on
-./manage.sh warp off
-
-# 只重启 WARP（轻量“刷新”出口）
-docker restart aio-proxy-warp-1
-
-# 更强的刷新（不保证每次变 IP）
-docker compose -f docker-compose.yml -f docker-compose.warp.yml down
-docker compose -f docker-compose.yml -f docker-compose.warp.yml up -d
-
-# 最强（清卷重建；Warp+ 会按同 License 重建）
-docker compose -f docker-compose.yml -f docker-compose.warp.yml down -v
-docker compose -f docker-compose.yml -f docker-compose.warp.yml up -d
+docker compose -f docker-compose.yml ps
+docker compose -f docker-compose.yml logs --tail=200
 ```
 
----
-
-## 校验是否工作正常
-
-### 校验服务可用性
-
-**FlareSolverr：**
+### 7.2 API 可用性验证
 
 ```bash
-curl --user "USER:PASS" -H "Content-Type: application/json" \
+curl --user "USER:PASS" \
+  -H "Content-Type: application/json" \
   -d '{"cmd":"request.get","url":"https://example.com","maxTimeout":20000}' \
-  http://<host>:<FLARE_PORT>/v1
+  http://<SERVER_IP>:<FLARE_PORT>/v1
 ```
 
-**Crawl4AI：**
+预期：返回 JSON，包含 `status` 与 `solution` 等字段。
+
+### 7.3 配置与产物检查
 
 ```bash
-curl -H "Content-Type: application/json" \
-  -d '{"urls":["https://example.com"]}' \
-  http://<host>:<CRAWL4AI_PORT>/crawl
-```
-
-### 校验是否走 WARP
-
-**方法 A：Cloudflare trace（看 `warp=on/off`）**
-
-* FlareSolverr：
-
-```bash
-curl --user "USER:PASS" -H "Content-Type: application/json" \
-  -d '{"cmd":"request.get","url":"https://www.cloudflare.com/cdn-cgi/trace","maxTimeout":30000}' \
-  http://<host>:<FLARE_PORT>/v1
-```
-
-* Crawl4AI：
-
-```bash
-curl -H "Content-Type: application/json" \
-  -d '{"urls":["https://www.cloudflare.com/cdn-cgi/trace"]}' \
-  http://<host>:<CRAWL4AI_PORT>/crawl
-```
-
-**方法 B：IP JSON（看 ASN/ORG 是否 Cloudflare/AS13335）**
-
-* FlareSolverr：
-
-```bash
-curl --user "USER:PASS" -H "Content-Type: application/json" \
-  -d '{"cmd":"request.get","url":"https://ipinfo.io/json","maxTimeout":30000}' \
-  http://<host>:<FLARE_PORT>/v1
-```
-
-* Crawl4AI：
-
-```bash
-curl -H "Content-Type: application/json" \
-  -d '{"urls":["https://ipinfo.io/json"]}' \
-  http://<host>:<CRAWL4AI_PORT>/crawl
+ls -la /opt/aio-proxy
+cat /opt/aio-proxy/.env
 ```
 
 ---
 
-## 自动回退策略（受限地区友好）
+## 8. Docker 安装与更新策略说明
 
-一些地区/机房（例如**香港/土耳其/印尼**等）对 **WireGuard/UDP 或 Cloudflare WARP** 有策略限制，可能导致 WARP 在安装时无法握手成功，表现为：
+`install.sh` 会调用同目录下的 `install_docker.sh`：
 
-* 业务容器解析得到 `warp` 主机，但 **连接 `warp:8080` 失败**；
-* 请求 FlareSolverr/Crawl4AI 报错 `ERR_PROXY_CONNECTION_FAILED` 或 500。
+- `--action install`：安装 Docker 引擎与 Compose 插件。
+- `--action update`：更新 Docker；若系统尚未安装则自动回退安装。
 
-**v6.1 的策略：**
+可单独调用：
 
-1. 你选择 `WARP=on` 安装时，脚本会先按开启状态启动所有容器；
-2. 紧接着进行**多次连通性检测**（探测 `warp:8080` 是否对外监听）；
-3. **若检测失败**：脚本会 **自动把 `.env` 中 `WARP_ENABLED=true` 改为 `false`**，并自动重启为**直连**模式；
-4. 安装**不会中断**，FlareSolverr、Crawl4AI 可正常使用；
-5. 将来你可以在网络条件允许时执行 `./manage.sh warp on && ./manage.sh restart` 再次尝试启用。
-
-> 这样，团队同事即便在受限的 VPS/地区也能“一键安装 → 可用”，不因 WARP 失败而影响工作。
+```bash
+sudo ./install_docker.sh --action install
+sudo ./install_docker.sh --action update
+sudo ./install_docker.sh --action update --yes
+```
 
 ---
 
-## 常见问题与排查
+## 9. 常见问题与排查
 
-**1）`ERR_PROXY_CONNECTION_FAILED`（FlareSolverr）**
+### 9.1 401 Unauthorized
 
-* 查看容器间连通性（应解析到同一网络并能通 `warp:8080`）：
+原因：BasicAuth 用户名或密码不匹配。
 
-  ```bash
-  docker exec aio-proxy-flaresolverr-1 sh -lc 'getent hosts warp && (echo | nc -vz warp 8080 >/dev/null 2>&1 && echo TCP_OK || echo TCP_FAIL)'
-  docker exec aio-proxy-crawl4ai-1    sh -lc 'getent hosts warp && (echo | nc -vz warp 8080 >/dev/null 2>&1 && echo TCP_OK || echo TCP_FAIL)'
-  ```
-* 如受限，可 `./manage.sh warp off` 改为直连；或请求级临时改为 `socks5://warp:1080` 再测。
-
-**2）Compose 网络冲突/告警**
-
-* 已统一 external 网络。若手工误操作：
-
-  ```bash
-  docker network rm aio-proxy-net 2>/dev/null || true
-  docker network create --driver bridge aio-proxy-net
-  cd /opt/aio-proxy && ./manage.sh restart
-  ```
-
-**3）401 未授权**
-
-* 用安装时的 BasicAuth；忘记就重置：
-
-  ```bash
-  ./manage.sh set-credentials flaresolverr NEW_USER NEW_PASS
-  ./manage.sh set-credentials crawl4ai    NEW_USER NEW_PASS
-  ```
-
-**4）APT 锁冲突**
-
-* v6.1 已自动等待 `dpkg lock`；若仍担心，可先让系统自动更新结束再执行安装。
-
----
-
-## 安全建议
-
-* 不把账号/密码写进仓库或 YAML；使用 `set-credentials` 动态改密（bcrypt htpasswd）。
-* 仅对可信 IP 放行对外端口；如需 HTTPS，可再加一层反代或接入 Cloudflare。
-* 定期更新镜像与系统补丁。
-
----
-
-## 卸载/清理
+处理：
 
 ```bash
 cd /opt/aio-proxy
-./manage.sh stop
-docker compose -f docker-compose.yml -f docker-compose.warp.yml down -v || docker compose -f docker-compose.yml down -v
-docker network rm aio-proxy-net 2>/dev/null || true
+./manage.sh set-credentials NEW_USER NEW_PASS
+```
+
+### 9.2 端口占用导致启动失败
+
+定位占用：
+
+```bash
+ss -ltnp | grep ':36584' || true
+```
+
+处理：修改 `.env` 中 `FLARE_PUBLIC_PORT` 后重启。
+
+### 9.3 `docker compose` 不可用
+
+定位：
+
+```bash
+docker compose version
+```
+
+处理：
+
+```bash
+sudo ./install_docker.sh --action update
+```
+
+### 9.4 菜单显示异常
+
+原因：终端不支持 `tput` 或非 TTY 场景。
+
+处理：脚本会自动回退到数字输入；也可直接使用 `--yes`。
+
+---
+
+## 10. 卸载与清理
+
+```bash
+cd /opt/aio-proxy
+./manage.sh stop || true
+docker compose -f docker-compose.yml down -v || true
 rm -rf /opt/aio-proxy
 ```
 
+如需清理网络（确认无其他项目使用）：
+
+```bash
+docker network rm aio-proxy-net 2>/dev/null || true
+```
+
 ---
 
-## 文件结构
+## 11. 文件结构
 
-```
+```text
 /opt/aio-proxy
-├─ docker-compose.yml            # backend: external aio-proxy-net
-├─ docker-compose.warp.yml       # warp 服务 + 代理注入
-├─ .env                          # 端口/WARP 开关/Warp+ Key/时区
-├─ manage.sh                     # 启停/日志/改密/warp on|off
+├─ docker-compose.yml
+├─ .env
+├─ manage.sh
 └─ nginx/
-   ├─ nginx.conf                 # 反代 + BasicAuth
-   ├─ htpasswd_flaresolverr      # bcrypt
-   └─ htpasswd_crawl4ai          # bcrypt
+   ├─ nginx.conf
+   └─ htpasswd_flaresolverr
 ```
 
 ---
 
-## 版本信息
+## 12. 版本变更记录
 
-* **install.sh v6.1**
-
-  * external 网络 `aio-proxy-net`；
-  * APT 锁智能等待；
-  * **WARP 自动回退策略**（受限地区自动直连，安装不中断）；
-  * `manage.sh`：`warp on/off`、`set-credentials`、日志/状态等；
-  * htpasswd 采用 **bcrypt**；默认时区 `Europe/Berlin`。
-
-```
-
----
+- `2026-03-08`
+- 安装流程收敛为 `edge + flaresolverr`。
+- 文档改为参考手册结构。
+- Docker 安装策略支持交互确认与参数覆盖（`--yes` / `--update-docker`）。
+- 交互确认支持方向键菜单，非兼容终端自动回退数字输入。

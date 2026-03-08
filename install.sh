@@ -1,52 +1,74 @@
 #!/usr/bin/env bash
-# AIO Proxy v6.4 - FlareSolverr + Crawl4AI + Cloudflare WARP (egress only)
-# - Fix: Nginx startup failure when only one upstream is running (use resolver+variable proxy_pass)
-# - Features: SERVICE_MODE (both|flare|crawl), WARP auto-fallback, APT lock wait, external network
-# 2025-10-22
+# AIO Proxy - FlareSolverr only baseline installer
+# 2026-03-08
 set -euo pipefail
 
 # ===== 参数校验 =====
-# 第 9 个参数：SERVICE_MODE（both|flare|crawl），默认 both
-if [ "$#" -lt 7 ] || [ "$#" -gt 9 ]; then
-  echo "用法: $0 <FLARE_USER> <FLARE_PASS> <FLARE_PORT> <C4AI_USER> <C4AI_PASS> <C4AI_PORT> <WARP_ON> [WARP_PLUS_KEY] [SERVICE_MODE]"
-  echo "示例(两者+WARP on): $0 u1 p1 36584 u2 p2 36585 on"
-  echo "示例(仅 Flare):    $0 u1 p1 36584 u2 p2 36585 off '' flare"
-  echo "示例(仅 Crawl):    $0 u1 p1 36584 u2 p2 36585 off '' crawl"
+usage() {
+  cat <<'USAGE'
+用法:
+  install.sh [--yes] [--update-docker] <FLARE_USER> <FLARE_PASS> <FLARE_PORT>
+
+参数:
+  --yes            非交互模式。按默认策略执行（未安装 Docker 默认安装；已安装默认不更新）
+  --update-docker  强制执行 Docker 更新（优先级高于默认策略）
+USAGE
+}
+
+ASSUME_YES="false"
+FORCE_UPDATE_DOCKER="false"
+POSITIONAL_ARGS=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --yes|-y)
+      ASSUME_YES="true"
+      shift
+      ;;
+    --update-docker)
+      FORCE_UPDATE_DOCKER="true"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      while [ "$#" -gt 0 ]; do
+        POSITIONAL_ARGS+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      echo "未知参数: $1"
+      usage
+      exit 1
+      ;;
+    *)
+      POSITIONAL_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${POSITIONAL_ARGS[@]}"
+if [ "$#" -ne 3 ]; then
+  usage
   exit 1
 fi
-FLARE_USER="$1"; FLARE_PASS="$2"; FLARE_PORT="$3"
-C4AI_USER="$4";  C4AI_PASS="$5";  C4AI_PORT="$6"
-WARP_SWITCH_RAW="$7"
-WARP_PLUS_KEY="${8-}"
-SERVICE_MODE_RAW="${9:-both}"
 
-normalize_bool() {
-  case "$(echo "$1" | tr '[:upper:]' '[:lower:]')" in
-    1|y|yes|on|true)  echo "true" ;;
-    0|n|no|off|false) echo "false" ;;
-    *) echo "false" ;;
-  esac
-}
-normalize_mode() {
-  case "$(echo "${1:-both}" | tr '[:upper:]' '[:lower:]')" in
-    flare|flaresolverr) echo "flare" ;;
-    crawl|crawl4ai)     echo "crawl" ;;
-    both|"")            echo "both" ;;
-    *)                  echo "both" ;;
-  esac
-}
-
-WARP_ENABLED="$(normalize_bool "$WARP_SWITCH_RAW")"
-SERVICE_MODE="$(normalize_mode "$SERVICE_MODE_RAW")"
+FLARE_USER="$1"
+FLARE_PASS="$2"
+FLARE_PORT="$3"
 
 # ===== 常量 =====
 APP_DIR="/opt/aio-proxy"
 NGX_DIR="${APP_DIR}/nginx"
 HT_FLARE="${NGX_DIR}/htpasswd_flaresolverr"
-HT_C4AI="${NGX_DIR}/htpasswd_crawl4ai"
 ENV_FILE="${APP_DIR}/.env"
 TZ_DEFAULT="Europe/Berlin"
-NET_NAME="aio-proxy-net"  # external 网络，所有容器加入
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ===== APT 锁等待 & 包管理辅助 =====
 apt_wait_lock() {
@@ -54,8 +76,8 @@ apt_wait_lock() {
   local i=0
   echo "[apt] waiting for dpkg lock if needed..."
   while fuser "$lock" >/dev/null 2>&1; do
-    i=$((i+1))
-    if [ $i -gt 300 ]; then
+    i=$((i + 1))
+    if [ "$i" -gt 300 ]; then
       echo "[apt] waited >300s for lock; still locked by other process."
       return 1
     fi
@@ -63,24 +85,203 @@ apt_wait_lock() {
   done
   return 0
 }
-apt_run() { apt_wait_lock || true; DEBIAN_FRONTEND=noninteractive apt-get -y "$@"; }
 
-# ===== Docker 安装/启动 =====
-if ! command -v docker >/dev/null 2>&1; then
-  apt_run update
-  apt_run install ca-certificates curl gnupg lsb-release
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-  chmod a+r /etc/apt/keyrings/docker.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
-  apt_run update
-  apt_run install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-fi
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl enable --now docker >/dev/null 2>&1 || true
-else
-  service docker start >/dev/null 2>&1 || true
-fi
+apt_run() {
+  apt_wait_lock || true
+  DEBIAN_FRONTEND=noninteractive apt-get -y "$@"
+}
+
+is_interactive_terminal() {
+  [ -t 0 ] && [ -t 1 ]
+}
+
+can_use_arrow_menu() {
+  is_interactive_terminal && command -v tput >/dev/null 2>&1 && [ "${TERM:-dumb}" != "dumb" ]
+}
+
+menu_cleanup() {
+  tput cnorm >/dev/null 2>&1 || true
+  tput sgr0 >/dev/null 2>&1 || true
+}
+
+confirm_with_number_input() {
+  local prompt="$1"
+  local default_choice="$2"
+  local default_index="1"
+  local answer=""
+
+  if [ "$default_choice" = "no" ]; then
+    default_index="2"
+  fi
+
+  echo "${prompt}"
+  echo "  1) yes"
+  echo "  2) no"
+  while true; do
+    read -r -p "请输入序号 [${default_index}]（q 退出）: " answer || true
+    answer="$(echo "${answer:-}" | tr '[:upper:]' '[:lower:]')"
+    if [ -z "$answer" ]; then
+      [ "$default_index" = "1" ] && return 0 || return 1
+    fi
+    case "$answer" in
+      1|y|yes) return 0 ;;
+      2|n|no) return 1 ;;
+      q|quit|exit)
+        echo "[install] 用户取消操作。"
+        exit 130
+        ;;
+      *)
+        echo "请输入 1/2 或 q。"
+        ;;
+    esac
+  done
+}
+
+confirm_with_arrow_menu() {
+  local prompt="$1"
+  local default_choice="$2"
+  local options=("yes" "no")
+  local selected=0
+  local default_index=0
+  local key=""
+  local key_rest=""
+  local idx=0
+  local prev_exit_trap=""
+
+  if [ "$default_choice" = "no" ]; then
+    default_index=1
+    selected=1
+  fi
+
+  prev_exit_trap="$(trap -p EXIT || true)"
+  trap 'menu_cleanup' EXIT
+  tput civis >/dev/null 2>&1 || true
+  tput sc >/dev/null 2>&1 || true
+
+  while true; do
+    tput rc >/dev/null 2>&1 || true
+    tput ed >/dev/null 2>&1 || true
+    printf "%s\n" "${prompt}"
+    for idx in "${!options[@]}"; do
+      if [ "$idx" -eq "$selected" ]; then
+        printf "> %s" "${options[$idx]}"
+      else
+        printf "  %s" "${options[$idx]}"
+      fi
+      if [ "$idx" -eq "$default_index" ]; then
+        printf " (default)"
+      fi
+      printf "\n"
+    done
+    printf "使用 ↑/↓ 选择，Enter 确认，q 退出。\n"
+
+    IFS= read -rsn1 key || true
+    case "$key" in
+      "")
+        break
+        ;;
+      q|Q)
+        menu_cleanup
+        [ -n "$prev_exit_trap" ] && eval "$prev_exit_trap" || trap - EXIT
+        echo
+        echo "[install] 用户取消操作。"
+        exit 130
+        ;;
+      $'\x1b')
+        IFS= read -rsn2 -t 0.1 key_rest || true
+        key="${key}${key_rest:-}"
+        case "$key" in
+          $'\x1b[A')
+            selected=$((selected - 1))
+            if [ "$selected" -lt 0 ]; then
+              selected=$((${#options[@]} - 1))
+            fi
+            ;;
+          $'\x1b[B')
+            selected=$((selected + 1))
+            if [ "$selected" -ge "${#options[@]}" ]; then
+              selected=0
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  done
+
+  menu_cleanup
+  [ -n "$prev_exit_trap" ] && eval "$prev_exit_trap" || trap - EXIT
+  tput rc >/dev/null 2>&1 || true
+  tput ed >/dev/null 2>&1 || true
+
+  [ "$selected" -eq 0 ]
+}
+
+confirm_with_default() {
+  local prompt="$1"
+  local default_choice="$2"
+
+  if can_use_arrow_menu; then
+    confirm_with_arrow_menu "$prompt" "$default_choice"
+  else
+    if ! is_interactive_terminal; then
+      echo "[install] 非 TTY 终端，回退到数字输入模式。"
+    fi
+    confirm_with_number_input "$prompt" "$default_choice"
+  fi
+}
+
+run_docker_installer() {
+  local action="$1"
+  local installer="${SCRIPT_DIR}/install_docker.sh"
+  local cmd=(bash "$installer" --action "$action")
+
+  if [ ! -f "$installer" ]; then
+    echo "[install] 未找到 Docker 安装器: $installer"
+    exit 1
+  fi
+  if [ "$ASSUME_YES" = "true" ]; then
+    cmd+=(--yes)
+  fi
+  "${cmd[@]}"
+}
+
+ensure_docker_runtime() {
+  local should_update="false"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    if [ "$ASSUME_YES" = "true" ] || confirm_with_default "未检测到 Docker，是否立即安装 Docker？" "yes"; then
+      echo "[install] 开始安装 Docker..."
+      run_docker_installer install
+    else
+      echo "[install] Docker 未安装，安装流程终止。"
+      exit 1
+    fi
+  else
+    if [ "$FORCE_UPDATE_DOCKER" = "true" ]; then
+      should_update="true"
+      echo "[install] 已启用 --update-docker，执行 Docker 更新。"
+    elif [ "$ASSUME_YES" = "true" ]; then
+      echo "[install] --yes 模式下，已安装 Docker 默认不更新。"
+    elif confirm_with_default "检测到已安装 Docker，是否替换更新 Docker？" "no"; then
+      should_update="true"
+    fi
+
+    if [ "$should_update" = "true" ]; then
+      run_docker_installer update
+    else
+      echo "[install] 保留当前 Docker 版本。"
+    fi
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now docker >/dev/null 2>&1 || true
+  else
+    service docker start >/dev/null 2>&1 || true
+  fi
+}
+
+# ===== Docker 安装/更新策略 =====
+ensure_docker_runtime
 
 detect_compose_bin() {
   if docker compose version >/dev/null 2>&1; then
@@ -88,43 +289,39 @@ detect_compose_bin() {
   elif command -v docker-compose >/dev/null 2>&1; then
     echo "docker-compose"
   else
-    apt_run update; apt_run install docker-compose-plugin || true
-    if docker compose version >/dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi
+    apt_run update
+    apt_run install docker-compose-plugin || true
+    if docker compose version >/dev/null 2>&1; then
+      echo "docker compose"
+    else
+      echo "docker-compose"
+    fi
   fi
 }
+
 COMPOSE_BIN="$(detect_compose_bin)"
 
 # ===== 依赖 =====
 apt_run install apache2-utils curl
 
-# ===== 目录与凭据（bcrypt htpasswd）=====
+# ===== 目录与凭据（bcrypt htpasswd） =====
 mkdir -p "${APP_DIR}" "${NGX_DIR}"
 htpasswd -nbB "${FLARE_USER}" "${FLARE_PASS}" > "${HT_FLARE}"
-htpasswd -nbB "${C4AI_USER}"  "${C4AI_PASS}"  > "${HT_C4AI}"
 
 # ===== .env =====
-cat > "${ENV_FILE}" <<EOF
+cat > "${ENV_FILE}" <<EOF_ENV
 # 全局
 TZ=${TZ_DEFAULT}
 
 # 对外端口（Nginx 暴露）
 FLARE_PUBLIC_PORT=${FLARE_PORT}
-CRAWL4AI_PUBLIC_PORT=${C4AI_PORT}
-
-# WARP 开关与 Warp+
-WARP_ENABLED=${WARP_ENABLED}
-WARP_PLUS_KEY=${WARP_PLUS_KEY:-}
-
-# 服务选择（both|flare|crawl）
-SERVICE_MODE=${SERVICE_MODE}
 
 # 内部端口（容器内固定）
 FLARE_INTERNAL_PORT=8191
-CRAWL4AI_INTERNAL_PORT=11235
-EOF
+EOF_ENV
 
-# ===== Nginx 配置（使用 resolver + 变量，避免启动期解析失败）=====
-cat > "${NGX_DIR}/nginx.conf" <<'EOF'
+# ===== Nginx 配置 =====
+cat > "${NGX_DIR}/nginx.conf" <<'EOF_NGINX'
 worker_processes auto;
 
 events { worker_connections 1024; }
@@ -136,17 +333,14 @@ http {
   keepalive_timeout 65;
   server_tokens off;
 
-  # 使用 Docker 内置 DNS，避免启动时解析失败
   resolver 127.0.0.11 valid=30s ipv6=off;
 
-  # FlareSolverr
   server {
     listen 8081;
     auth_basic "Restricted";
     auth_basic_user_file /etc/nginx/htpasswd_flaresolverr;
 
     location / {
-      # 变量化上游：仅在请求时解析 flaresolverr 主机
       set $flare_upstream "flaresolverr:8191";
       proxy_set_header Host              $host;
       proxy_set_header X-Real-IP         $remote_addr;
@@ -157,30 +351,11 @@ http {
       proxy_pass http://$flare_upstream;
     }
   }
-
-  # Crawl4AI
-  server {
-    listen 8082;
-    auth_basic "Restricted";
-    auth_basic_user_file /etc/nginx/htpasswd_crawl4ai;
-
-    location / {
-      # 变量化上游：仅在请求时解析 crawl4ai 主机
-      set $crawl_upstream "crawl4ai:11235";
-      proxy_set_header Host              $host;
-      proxy_set_header X-Real-IP         $remote_addr;
-      proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
-      proxy_http_version 1.1;
-      proxy_set_header Connection "";
-      proxy_pass http://$crawl_upstream;
-    }
-  }
 }
-EOF
+EOF_NGINX
 
-# ===== docker-compose.yml（external 网络；edge 无 depends_on）=====
-cat > "${APP_DIR}/docker-compose.yml" <<'EOF'
+# ===== docker-compose.yml =====
+cat > "${APP_DIR}/docker-compose.yml" <<'EOF_COMPOSE'
 services:
   flaresolverr:
     image: flaresolverr/flaresolverr:latest
@@ -193,83 +368,31 @@ services:
     shm_size: "1g"
     networks: [ backend ]
 
-  crawl4ai:
-    image: unclecode/crawl4ai:latest
-    restart: unless-stopped
-    shm_size: "1g"
-    expose:
-      - "11235"
-    networks: [ backend ]
-
   edge:
     image: nginx:alpine
     restart: unless-stopped
-    # 不使用 depends_on，便于选择性只启其中一个上游
     ports:
       - "${FLARE_PUBLIC_PORT}:8081"
-      - "${CRAWL4AI_PUBLIC_PORT}:8082"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/htpasswd_flaresolverr:/etc/nginx/htpasswd_flaresolverr:ro
-      - ./nginx/htpasswd_crawl4ai:/etc/nginx/htpasswd_crawl4ai:ro
     environment:
       - TZ=${TZ}
     networks: [ backend ]
 
 networks:
   backend:
-    external: true
+    driver: bridge
     name: aio-proxy-net
-EOF
+EOF_COMPOSE
 
-# ===== docker-compose.warp.yml（业务容器依赖 warp）=====
-cat > "${APP_DIR}/docker-compose.warp.yml" <<'EOF'
-services:
-  warp:
-    image: shahradel/cfw-proxy:latest
-    restart: unless-stopped
-    privileged: true
-    cap_add: [ NET_ADMIN, SYS_MODULE ]
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv6.conf.all.disable_ipv6=0
-    environment:
-      - TZ=${TZ}
-      - HTTP_PORT=8080
-      - SOCKS5_PORT=1080
-      - WGCF_LICENSE_KEY=${WARP_PLUS_KEY}
-    networks: [ backend ]
-
-  flaresolverr:
-    depends_on: [ warp ]
-    environment:
-      - PROXY_URL=http://warp:8080
-
-  crawl4ai:
-    depends_on: [ warp ]
-    environment:
-      - HTTP_PROXY=http://warp:8080
-      - HTTPS_PROXY=http://warp:8080
-      - NO_PROXY=localhost,127.0.0.1,::1
-
-networks:
-  backend:
-    external: true
-    name: aio-proxy-net
-EOF
-
-# ===== manage.sh（按 SERVICE_MODE 选择性启动服务）=====
-cat > "${APP_DIR}/manage.sh" <<'EOF'
+# ===== manage.sh =====
+cat > "${APP_DIR}/manage.sh" <<'EOF_MANAGE'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
 
 [ -f ".env" ] || { echo "未找到 .env"; exit 1; }
-# shellcheck disable=SC1091
-source .env
-
-NET_NAME="aio-proxy-net"
 
 detect_compose_bin() {
   if docker compose version >/dev/null 2>&1; then
@@ -280,193 +403,56 @@ detect_compose_bin() {
     echo "docker compose"
   fi
 }
+
 COMPOSE_BIN="$(detect_compose_bin)"
-
-compose_base=($COMPOSE_BIN -f docker-compose.yml)
-compose_with_warp=($COMPOSE_BIN -f docker-compose.yml -f docker-compose.warp.yml)
-
-ensure_external_net() {
-  docker network inspect "${NET_NAME}" >/dev/null 2>&1 || \
-  docker network create --driver bridge "${NET_NAME}" >/dev/null
-}
-
-normalize_mode() {
-  case "$(echo "${1:-both}" | tr '[:upper:]' '[:lower:]')" in
-    flare|flaresolverr) echo "flare" ;;
-    crawl|crawl4ai)     echo "crawl" ;;
-    both|"")            echo "both" ;;
-    *)                  echo "both" ;;
-  esac
-}
-
-selected_services() {
-  local mode="$(normalize_mode "${SERVICE_MODE:-both}")"
-  local arr=(edge)
-  case "$mode" in
-    flare) arr+=(flaresolverr) ;;
-    crawl) arr+=(crawl4ai) ;;
-    both)  arr+=(flaresolverr crawl4ai) ;;
-  esac
-  printf "%s\n" "${arr[@]}"
-}
+compose_cmd=($COMPOSE_BIN -f docker-compose.yml)
 
 case "${1:-start}" in
   start|up)
-    ensure_external_net
-    mapfile -t SVC < <(selected_services)
-    echo "[manage] SERVICE_MODE=${SERVICE_MODE:-both}  WARP_ENABLED=${WARP_ENABLED:-false}"
-    echo "[manage] 即将启动服务: ${SVC[*]}"
-    if [ "${WARP_ENABLED:-false}" = "true" ]; then
-      "${compose_with_warp[@]}" up -d "${SVC[@]}"
-    else
-      "${compose_base[@]}" up -d "${SVC[@]}"
-    fi
+    "${compose_cmd[@]}" up -d flaresolverr edge
     ;;
   stop|down)
-    echo "[manage] 停止..."
-    "${compose_with_warp[@]}" down || true
-    "${compose_base[@]}" down || true
+    "${compose_cmd[@]}" down || true
     ;;
   restart)
-    "$0" stop; "$0" start;;
+    "$0" stop
+    "$0" start
+    ;;
   ps|status)
-    "${compose_with_warp[@]}" ps;;
+    "${compose_cmd[@]}" ps
+    ;;
   logs)
-    if [ "${WARP_ENABLED:-false}" = "true" ]; then
-      "${compose_with_warp[@]}" logs -f --tail=200
-    else
-      "${compose_base[@]}" logs -f --tail=200
-    fi
-    ;;
-  warp)
-    shift || true
-    want="${1:-}"
-    case "$want" in
-      on|enable|true)   sed -i 's/^WARP_ENABLED=.*/WARP_ENABLED=true/' .env ;;
-      off|disable|false) sed -i 's/^WARP_ENABLED=.*/WARP_ENABLED=false/' .env ;;
-      *) echo "用法: $0 warp {on|off}"; exit 1;;
-    esac
-    "$0" restart
-    ;;
-  set-mode)
-    # ./manage.sh set-mode {both|flare|crawl}
-    shift || true
-    mode="${1:-both}"
-    case "$(echo "$mode" | tr '[:upper:]' '[:lower:]')" in
-      flare|flaresolverr) sed -i 's/^SERVICE_MODE=.*/SERVICE_MODE=flare/' .env ;;
-      crawl|crawl4ai)     sed -i 's/^SERVICE_MODE=.*/SERVICE_MODE=crawl/' .env ;;
-      both|"")            sed -i 's/^SERVICE_MODE=.*/SERVICE_MODE=both/' .env ;;
-      *) echo "用法: $0 set-mode {both|flare|crawl}"; exit 1;;
-    esac
-    "$0" restart
+    "${compose_cmd[@]}" logs -f --tail=200
     ;;
   set-credentials)
-    svc="${2:-}"; user="${3:-}"; pass="${4:-}"
-    if [ -z "${svc}" ] || [ -z "${user}" ] || [ -z "${pass}" ]; then
-      echo "用法: $0 set-credentials {flaresolverr|crawl4ai} <user> <pass>"; exit 1
+    user="${2:-}"
+    pass="${3:-}"
+    if [ -z "${user}" ] || [ -z "${pass}" ]; then
+      echo "用法: $0 set-credentials <user> <pass>"
+      exit 1
     fi
-    case "$svc" in
-      flaresolverr) ht=./nginx/htpasswd_flaresolverr;;
-      crawl4ai)    ht=./nginx/htpasswd_crawl4ai;;
-      *) echo "未知服务: $svc"; exit 1;;
-    esac
     command -v htpasswd >/dev/null 2>&1 || { echo "需要安装 apache2-utils"; exit 1; }
-    htpasswd -nbB "$user" "$pass" > "$ht"
-    echo "[manage] 已更新 $svc 凭据，重启 edge ..."
+    htpasswd -nbB "$user" "$pass" > ./nginx/htpasswd_flaresolverr
+    echo "[manage] 已更新 flaresolverr 凭据，重启 edge ..."
     ${COMPOSE_BIN} restart edge
     ;;
   *)
     cat <<USAGE
-用法: $0 {start|stop|restart|ps|logs|warp {on|off}|set-mode {both|flare|crawl}|set-credentials <svc> <user> <pass>}
+用法: $0 {start|stop|restart|ps|logs|set-credentials <user> <pass>}
 USAGE
-    exit 1;;
+    exit 1
+    ;;
 esac
-EOF
+EOF_MANAGE
 chmod +x "${APP_DIR}/manage.sh"
 
-# ===== external 网络兜底 =====
-docker network inspect "${NET_NAME}" >/dev/null 2>&1 || docker network create --driver bridge "${NET_NAME}" >/dev/null
-
-# ===== 选择性启动（按 SERVICE_MODE + WARP_ENABLED）=====
+# ===== 启动服务 =====
 cd "${APP_DIR}"
-select_services() {
-  case "$(echo "${SERVICE_MODE}" | tr '[:upper:]' '[:lower:]')" in
-    flare|flaresolverr) echo "edge flaresolverr" ;;
-    crawl|crawl4ai)     echo "edge crawl4ai" ;;
-    *)                  echo "edge flaresolverr crawl4ai" ;;
-  esac
-}
-SVC_LIST=( $(select_services) )
-echo "[install] SERVICE_MODE=${SERVICE_MODE}  WARP_ENABLED=${WARP_ENABLED}"
-echo "[install] 首次启动服务: ${SVC_LIST[*]}"
-if [ "${WARP_ENABLED}" = "true" ]; then
-  ${COMPOSE_BIN} -f docker-compose.yml -f docker-compose.warp.yml up -d "${SVC_LIST[@]}"
-else
-  ${COMPOSE_BIN} -f docker-compose.yml up -d "${SVC_LIST[@]}"
-fi
-
-# ===== 公网 IP 提取工具 =====
-parse_first_ip() {
-  local s; s="$(cat || true)"
-  local v4; v4="$(printf "%s" "$s" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)"
-  if [ -n "$v4" ]; then printf "%s" "$v4"; return 0; fi
-  local v6; v6="$(printf "%s" "$s" | grep -Eo '([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}' | head -n1 || true)"
-  [ -n "$v6" ] && printf "%s" "$v6"
-}
-
-get_public_ip_host() { curl -sS -A Mozilla --max-time 5 https://api.ip.sb/ip | parse_first_ip || true; }
-get_public_ip_via_warp_proxy() {
-  docker run --rm --network "${NET_NAME}" curlimages/curl:8.8.0 \
-    -sS -A Mozilla --max-time 5 -x http://warp:8080 https://api.ip.sb/ip | parse_first_ip || true
-}
-
-# ===== 安装期：自动检测 WARP（对比 IP），失败则自动回退 =====
-auto_warp_check_and_fallback_ip() {
-  cd "${APP_DIR}"
-  if [ "${WARP_ENABLED}" != "true" ]; then
-    echo "[auto] WARP disabled by user choice; skip checking."
-    return 0
-  fi
-  case "${SERVICE_MODE}" in
-    flare|crawl|both) : ;;
-    *) echo "[auto] no business service selected; skip checking."; return 0 ;;
-  esac
-
-  echo "[auto] checking WARP egress by comparing public IPs..."
-  local host_ip warp_ip ok=0
-  host_ip="$(get_public_ip_host || true)"
-  echo "[auto] host public IP: ${host_ip:-<empty>}"
-  sleep 6
-  for try in $(seq 1 20); do
-    echo "[auto] try #$try ..."
-    warp_ip="$(get_public_ip_via_warp_proxy || true)"
-    echo "[auto] warp(proxied) IP: ${warp_ip:-<empty>}"
-    if [ -n "${warp_ip:-}" ] && { [ -z "${host_ip:-}" ] || [ "${warp_ip}" != "${host_ip}" ]; }; then
-      ok=1; echo "[auto] WARP egress looks active (IP differs)."; break
-    fi
-    sleep 3
-  done
-
-  if [ "$ok" -eq 0 ]; then
-    echo "[auto] WARP egress check failed; switching OFF and restarting without WARP..."
-    sed -i "s/^WARP_ENABLED=.*/WARP_ENABLED=false/" .env
-    ${COMPOSE_BIN} -f docker-compose.yml -f docker-compose.warp.yml down || true
-    ${COMPOSE_BIN} -f docker-compose.yml up -d "${SVC_LIST[@]}"
-    echo "[auto] fallback done. 以后可运行：cd ${APP_DIR} && ./manage.sh warp on"
-  else
-    echo "[auto] WARP OK."
-  fi
-}
-auto_warp_check_and_fallback_ip
+${COMPOSE_BIN} -f docker-compose.yml up -d flaresolverr edge
 
 echo
-echo "==================== 安装完成 (v6.4) ===================="
+echo "==================== 安装完成 ===================="
 echo "FlareSolverr ： http://<服务器>:${FLARE_PORT}    （BasicAuth）"
-echo "Crawl4AI     ： http://<服务器>:${C4AI_PORT}     （/playground，BasicAuth）"
-echo "WARP 状态    ： $(grep '^WARP_ENABLED=' ${ENV_FILE} | cut -d= -f2)"
-echo "服务模式     ： $(grep '^SERVICE_MODE=' ${ENV_FILE} | cut -d= -f2)  （切换：cd ${APP_DIR} && ./manage.sh set-mode {both|flare|crawl}）"
-echo "改密码       ： cd ${APP_DIR} && ./manage.sh set-credentials flaresolverr <user> <pass>"
-echo "               cd ${APP_DIR} && ./manage.sh set-credentials crawl4ai    <user> <pass>"
+echo "改密码       ： cd ${APP_DIR} && ./manage.sh set-credentials <user> <pass>"
 echo "启停/日志    ： cd ${APP_DIR} && ./manage.sh {start|stop|restart|ps|logs}"
-echo "WARP 开关    ： cd ${APP_DIR} && ./manage.sh warp {on|off}"
-echo "========================================================"
+echo "=================================================="
