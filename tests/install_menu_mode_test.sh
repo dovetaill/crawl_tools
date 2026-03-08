@@ -103,4 +103,31 @@ if ! rg -n 'render_page_header "当前配置"' ./install.sh >/dev/null 2>&1; the
 fi
 pass "page rendering helper is wired"
 
+# Test 10: install.sh should work standalone without requiring install_docker.sh beside it
+if ! rg -n '^run_docker_installer_inline\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing inline docker installer fallback"
+fi
+if ! rg -n '回退到内置 Docker 安装流程' ./install.sh >/dev/null 2>&1; then
+  fail "missing fallback message for standalone install.sh mode"
+fi
+pass "standalone install.sh docker fallback exists"
+
+# Test 11: README remote install should support single-script download path
+if ! rg -n 'curl -fsSL .*install\\.sh \\| sudo bash' ./README.md >/dev/null 2>&1; then
+  fail "README is missing simplified single-script remote install command"
+fi
+pass "README includes simplified single-script remote install command"
+
+# Test 12: quick mode should exist for newbie one-liner install
+if ! rg -n '^quick_install_flow\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing quick_install_flow"
+fi
+if ! rg -n -- '--quick' ./install.sh >/dev/null 2>&1; then
+  fail "install.sh missing --quick option"
+fi
+if ! rg -n 'bash -s -- --quick' ./README.md >/dev/null 2>&1; then
+  fail "README missing --quick one-liner example"
+fi
+pass "quick mode hooks and docs exist"
+
 echo "All tests passed"

@@ -90,38 +90,28 @@ sudo ./install.sh --yes --update-docker admin 'StrongPass123' 36584
 
 ### 3.4 远程拉取脚本执行（可选）
 
-菜单模式（无参数）：
+新手极简模式（推荐）：
 
 ```bash
-sudo bash -c '
-  set -euo pipefail
-  BASE_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master"
-  TMP_DIR="$(mktemp -d /tmp/aio-proxy.XXXXXX)"
-
-  curl -fsSL "$BASE_URL/install.sh" -o "$TMP_DIR/install.sh"
-  curl -fsSL "$BASE_URL/install_docker.sh" -o "$TMP_DIR/install_docker.sh"
-  chmod +x "$TMP_DIR/install.sh" "$TMP_DIR/install_docker.sh"
-
-  "$TMP_DIR/install.sh"
-  rm -rf "$TMP_DIR"
-'
+curl -fsSL "https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh" | sudo bash -s -- --quick
 ```
 
-参数模式（示例：非交互默认策略）：
+管道无参数模式（自动回退 quick）：
 
 ```bash
-sudo bash -c '
-  set -euo pipefail
-  BASE_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master"
-  TMP_DIR="$(mktemp -d /tmp/aio-proxy.XXXXXX)"
+curl -fsSL "https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh" | sudo bash
+```
 
-  curl -fsSL "$BASE_URL/install.sh" -o "$TMP_DIR/install.sh"
-  curl -fsSL "$BASE_URL/install_docker.sh" -o "$TMP_DIR/install_docker.sh"
-  chmod +x "$TMP_DIR/install.sh" "$TMP_DIR/install_docker.sh"
+参数模式（示例：指定账号密码端口）：
 
-  "$TMP_DIR/install.sh" --yes admin "StrongPass123" 36584
-  rm -rf "$TMP_DIR"
-'
+```bash
+curl -fsSL "https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh" | sudo bash -s -- --yes admin "StrongPass123" 36584
+```
+
+如需进入完整菜单交互，请先下载到本地再执行：
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh" -o /tmp/install.sh && sudo bash /tmp/install.sh
 ```
 
 ---
@@ -135,6 +125,10 @@ install.sh [--yes] [--update-docker] <FLARE_USER> <FLARE_PASS> <FLARE_PORT>
 ```
 
 ```bash
+install.sh --quick
+```
+
+```bash
 install.sh
 ```
 
@@ -142,6 +136,7 @@ install.sh
 
 参数说明：
 
+- `--quick`：一键快速安装（自动生成账号/密码/端口，非交互）。
 - `--yes`：非交互模式，采用默认决策。
 - `--update-docker`：强制执行 Docker 更新。
 - `FLARE_USER`：BasicAuth 用户名。
@@ -284,10 +279,10 @@ cat /opt/aio-proxy/.env
 
 ## 8. Docker 安装与更新策略说明
 
-`install.sh` 会调用同目录下的 `install_docker.sh`：
+`install.sh` 的 Docker 处理策略：
 
-- `--action install`：安装 Docker 引擎与 Compose 插件。
-- `--action update`：更新 Docker；若系统尚未安装则自动回退安装。
+- 若同目录存在 `install_docker.sh`：优先调用外部安装器。
+- 若不存在：自动回退到 `install.sh` 内置 Docker 安装流程（单脚本模式可直接运行）。
 
 可单独调用：
 
@@ -344,9 +339,9 @@ sudo ./install_docker.sh --action update
 
 ### 9.5 `[install] 未找到 Docker 安装器`
 
-原因：只下载了 `install.sh`，未与 `install_docker.sh` 放在同一目录。
+原因：`install.sh` 与 `install_docker.sh` 不在同一目录。
 
-处理：按 3.4 示例同时下载 `install.sh` 和 `install_docker.sh` 后再执行。
+处理：新版本会自动回退到内置安装流程，通常可忽略该提示；也可将两个脚本放在同目录以使用外部安装器。
 
 ---
 

@@ -16,12 +16,15 @@ usage() {
   cat <<'USAGE'
 用法:
   install.sh [--yes] [--update-docker] <FLARE_USER> <FLARE_PASS> <FLARE_PORT>
+  install.sh [--quick]
 
 说明:
   - 无参数启动时，进入 AIO Proxy 管理菜单（交互模式）
   - 传参启动时，按参数模式执行安装
+  - 非交互且无输入时，会自动回退 --quick 一键安装
 
 参数:
+  --quick          一键快速安装（自动生成账号/密码/端口，非交互）
   --yes            非交互模式。按默认策略执行（未安装 Docker 默认安装；已安装默认不更新）
   --update-docker  强制执行 Docker 更新（优先级高于默认策略）
 USAGE
@@ -29,6 +32,7 @@ USAGE
 
 ASSUME_YES="false"
 FORCE_UPDATE_DOCKER="false"
+QUICK_MODE="false"
 POSITIONAL_ARGS=()
 
 # ===== APT 锁等待 & 包管理辅助 =====
@@ -50,6 +54,75 @@ apt_wait_lock() {
 apt_run() {
   apt_wait_lock || true
   DEBIAN_FRONTEND=noninteractive apt-get -y "$@"
+}
+
+detect_docker_repo_distribution() {
+  local dist="debian"
+  local id_like=""
+  if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    case "${ID:-}" in
+      ubuntu|debian)
+        dist="${ID}"
+        ;;
+      *)
+        id_like="${ID_LIKE:-}"
+        if echo " ${id_like} " | grep -qi ' ubuntu '; then
+          dist="ubuntu"
+        elif echo " ${id_like} " | grep -qi ' debian '; then
+          dist="debian"
+        fi
+        ;;
+    esac
+  fi
+  printf '%s' "$dist"
+}
+
+detect_docker_repo_codename() {
+  local codename=""
+  if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    codename="${VERSION_CODENAME:-}"
+  fi
+  if [ -z "$codename" ] && command -v lsb_release >/dev/null 2>&1; then
+    codename="$(lsb_release -cs 2>/dev/null || true)"
+  fi
+  if [ -z "$codename" ]; then
+    codename="stable"
+  fi
+  printf '%s' "$codename"
+}
+
+run_docker_installer_inline() {
+  local action="$1"
+  local dist=""
+  local codename=""
+
+  dist="$(detect_docker_repo_distribution)"
+  codename="$(detect_docker_repo_codename)"
+
+  echo "[install] 使用内置 Docker 安装流程（${dist}/${codename}）..."
+  apt_run install ca-certificates curl gnupg lsb-release apt-transport-https
+  install -m 0755 -d /etc/apt/keyrings
+  rm -f /etc/apt/keyrings/docker.gpg
+  curl -fsSL "https://download.docker.com/linux/${dist}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+
+  cat > /etc/apt/sources.list.d/docker.list <<EOF_DOCKER_REPO
+deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${dist} ${codename} stable
+EOF_DOCKER_REPO
+
+  apt_run update
+  if [ "$action" = "install" ]; then
+    apt_run install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  elif command -v docker >/dev/null 2>&1; then
+    apt_run install --only-upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  else
+    echo "[install] update 模式下未检测到 Docker，自动回退 install。"
+    apt_run install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  fi
 }
 
 is_interactive_terminal() {
@@ -296,14 +369,17 @@ run_docker_installer() {
   local installer="${SCRIPT_DIR}/install_docker.sh"
   local cmd=(bash "$installer" --action "$action")
 
-  if [ ! -f "$installer" ]; then
-    echo "[install] 未找到 Docker 安装器: $installer"
-    exit 1
+  if [ -f "$installer" ]; then
+    if [ "$ASSUME_YES" = "true" ]; then
+      cmd+=(--yes)
+    fi
+    "${cmd[@]}"
+    return 0
   fi
-  if [ "$ASSUME_YES" = "true" ]; then
-    cmd+=(--yes)
-  fi
-  "${cmd[@]}"
+
+  echo "[install] 未找到 Docker 安装器: $installer"
+  echo "[install] 回退到内置 Docker 安装流程（单脚本模式）。"
+  run_docker_installer_inline "$action"
 }
 
 ensure_docker_runtime() {
@@ -1010,9 +1086,33 @@ perform_install() {
   echo "${UI_GREEN}==================================================${UI_RESET}"
 }
 
+quick_install_flow() {
+  local quick_user=""
+  local quick_pass=""
+  local quick_port=""
+
+  require_root
+  ASSUME_YES="true"
+
+  quick_user="$(generate_random_username)"
+  quick_pass="$(generate_random_password)"
+  quick_port="$(generate_random_port)"
+
+  echo "[quick] 已启用一键快速安装（非交互）。"
+  echo "[quick] 账号: ${quick_user}"
+  echo "[quick] 密码: ${quick_pass}"
+  echo "[quick] 端口: ${quick_port}"
+
+  perform_install "${quick_user}" "${quick_pass}" "${quick_port}"
+}
+
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --quick)
+        QUICK_MODE="true"
+        shift
+        ;;
       --yes|-y)
         ASSUME_YES="true"
         shift
@@ -1048,8 +1148,20 @@ parse_args() {
 main() {
   parse_args "$@"
 
+  if [ "$QUICK_MODE" = "true" ]; then
+    quick_install_flow
+    return 0
+  fi
+
   # 无参数进入菜单模式
   if [ "${#POSITIONAL_ARGS[@]}" -eq 0 ] && [ "$ASSUME_YES" = "false" ] && [ "$FORCE_UPDATE_DOCKER" = "false" ]; then
+    if ! is_interactive_terminal; then
+      if ! IFS= read -r -t 0; then
+        echo "[install] 检测到非交互终端且无可读输入，自动切换 --quick。"
+        quick_install_flow
+        return 0
+      fi
+    fi
     menu_mode
     return 0
   fi
