@@ -71,7 +71,7 @@ sudo ./install.sh --yes --update-docker admin 'StrongPass123' 36584
 ```bash
 sudo bash -c '
   set -e
-  SCRIPT_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/main/install.sh"
+  SCRIPT_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh"
   SCRIPT_PATH="/tmp/install_aio_proxy.sh"
   curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_PATH"
   chmod +x "$SCRIPT_PATH"
