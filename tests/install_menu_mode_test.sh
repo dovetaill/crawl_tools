@@ -130,4 +130,25 @@ if ! rg -n 'bash -s -- --quick' ./README.md >/dev/null 2>&1; then
 fi
 pass "quick mode hooks and docs exist"
 
+# Test 13: all install modes should enforce port occupancy checks
+if ! rg -n '^is_port_in_use\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing is_port_in_use helper"
+fi
+if ! rg -n '^is_port_available_for_install\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing is_port_available_for_install helper"
+fi
+if ! rg -n 'if ! is_port_available_for_install "\$flare_port" "true"; then' ./install.sh >/dev/null 2>&1; then
+  fail "perform_install is missing pre-install port occupancy guard"
+fi
+if ! rg -n '\[quick\] 端口 .* 已被占用，自动重试为:' ./install.sh >/dev/null 2>&1; then
+  fail "quick mode missing automatic port retry message"
+fi
+if ! rg -n '端口已被占用，请重新输入或留空自动生成。' ./install.sh >/dev/null 2>&1; then
+  fail "manual menu install missing occupied-port prompt"
+fi
+if ! rg -n '新端口已被占用，请更换。' ./install.sh >/dev/null 2>&1; then
+  fail "manual port-update flow missing occupied-port prompt"
+fi
+pass "port occupancy validation is wired for quick, one-click and manual flows"
+
 echo "All tests passed"

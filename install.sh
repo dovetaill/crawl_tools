@@ -302,6 +302,46 @@ validate_port() {
   return 0
 }
 
+is_port_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnH "( sport = :${port} )" 2>/dev/null | grep -q .
+    return $?
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|[.:])${port}$" >/dev/null
+    return $?
+  fi
+  return 1
+}
+
+get_existing_app_port() {
+  if app_installed; then
+    awk -F= '/^FLARE_PUBLIC_PORT=/{print $2}' "$ENV_FILE" 2>/dev/null || true
+  fi
+}
+
+is_port_available_for_install() {
+  local port="$1"
+  local allow_existing_same="${2:-false}"
+  local existing_port=""
+
+  if ! is_port_in_use "$port"; then
+    return 0
+  fi
+  if [ "$allow_existing_same" = "true" ]; then
+    existing_port="$(get_existing_app_port)"
+    if [ -n "${existing_port:-}" ] && [ "$existing_port" = "$port" ]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 random_from_charset() {
   local length="$1"
   local charset="$2"
@@ -326,9 +366,15 @@ generate_random_password() {
 generate_random_port() {
   local i=0
   local candidate=0
-  for ((i = 0; i < 200; i++)); do
+  for ((i = 0; i < 300; i++)); do
     candidate=$((20000 + RANDOM % 30000))
-    if validate_port "$candidate"; then
+    if validate_port "$candidate" && is_port_available_for_install "$candidate" "false"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  for ((candidate = 20000; candidate <= 65000; candidate++)); do
+    if is_port_available_for_install "$candidate" "false"; then
       printf '%s' "$candidate"
       return 0
     fi
@@ -540,11 +586,15 @@ install_or_reinstall_flow() {
       echo "[menu] 未输入端口，已自动生成: ${port}"
       break
     fi
-    if validate_port "$port_input"; then
+    if ! validate_port "$port_input"; then
+      echo "端口必须为 1-65535 的数字。"
+      continue
+    fi
+    if is_port_available_for_install "$port_input" "true"; then
       port="$port_input"
       break
     fi
-    echo "端口必须为 1-65535 的数字。"
+    echo "端口已被占用，请重新输入或留空自动生成。"
   done
 
   perform_install "$user" "$pass" "$port"
@@ -585,7 +635,13 @@ update_port_flow() {
   fi
 
   current_port="$(awk -F= '/^FLARE_PUBLIC_PORT=/{print $2}' "$ENV_FILE" 2>/dev/null || echo '36584')"
-  new_port="$(read_port_with_default '请输入新的对外端口' "$current_port")"
+  while true; do
+    new_port="$(read_port_with_default '请输入新的对外端口' "$current_port")"
+    if [ "$new_port" = "$current_port" ] || is_port_available_for_install "$new_port" "false"; then
+      break
+    fi
+    echo "[menu] 新端口已被占用，请更换。"
+  done
 
   sed -i "s/^FLARE_PUBLIC_PORT=.*/FLARE_PUBLIC_PORT=${new_port}/" "$ENV_FILE"
   echo "[menu] 端口已更新为 ${new_port}，正在重启服务..."
@@ -1048,12 +1104,33 @@ perform_install() {
   local flare_pass="$2"
   local flare_port="$3"
   local compose_bin=""
+  local retry_port=""
+  local i=0
 
   require_root
 
   if ! validate_port "$flare_port"; then
     echo "[install] 端口非法: ${flare_port}"
     exit 1
+  fi
+  if ! is_port_available_for_install "$flare_port" "true"; then
+    if [ "$QUICK_MODE" = "true" ]; then
+      for ((i = 0; i < 30; i++)); do
+        retry_port="$(generate_random_port)"
+        if is_port_available_for_install "$retry_port" "false"; then
+          echo "[quick] 端口 ${flare_port} 已被占用，自动重试为: ${retry_port}"
+          flare_port="$retry_port"
+          break
+        fi
+      done
+      if ! is_port_available_for_install "$flare_port" "false"; then
+        echo "[install] 无法找到可用端口，请稍后重试或手动指定。"
+        exit 1
+      fi
+    else
+      echo "[install] 端口已被占用: ${flare_port}"
+      exit 1
+    fi
   fi
 
   ensure_docker_runtime
@@ -1092,6 +1169,7 @@ quick_install_flow() {
   local quick_port=""
 
   require_root
+  QUICK_MODE="true"
   ASSUME_YES="true"
 
   quick_user="$(generate_random_username)"

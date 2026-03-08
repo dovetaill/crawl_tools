@@ -96,17 +96,32 @@ sudo ./install.sh --yes --update-docker admin 'StrongPass123' 36584
 curl -fsSL "https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh" | sudo bash -s -- --quick
 ```
 
+说明：
+
+- `--quick` 会自动生成账号/密码/端口。
+- 若随机端口被占用，会在安装前自动重试随机端口。
+
 管道无参数模式（自动回退 quick）：
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh" | sudo bash
 ```
 
+说明：
+
+- 在无交互输入的管道场景中，无参数会自动进入 quick 逻辑。
+- 同样会执行端口占用检测与自动重试随机端口。
+
 参数模式（示例：指定账号密码端口）：
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh" | sudo bash -s -- --yes admin "StrongPass123" 36584
 ```
+
+说明：
+
+- 指定端口会在安装前执行占用检测。
+- 端口已占用时会直接报错并终止安装（不会静默覆盖）。
 
 如需进入完整菜单交互，请先下载到本地再执行：
 
@@ -142,6 +157,11 @@ install.sh
 - `FLARE_USER`：BasicAuth 用户名。
 - `FLARE_PASS`：BasicAuth 密码。
 - `FLARE_PORT`：对外访问端口（映射到 `edge:8081`）。
+
+端口校验策略：
+
+- quick / 一键模式：安装前检测占用，冲突时自动重试随机端口。
+- 手动输入模式：安装前检测占用，冲突时提示更换（菜单）或直接失败（CLI 参数模式）。
 
 ### 4.2 默认值（脚本生成）
 
