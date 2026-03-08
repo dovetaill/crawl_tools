@@ -245,6 +245,7 @@ cd /opt/aio-proxy
 常用命令：
 
 ```bash
+./manage.sh
 ./manage.sh start
 ./manage.sh stop
 ./manage.sh restart
@@ -252,10 +253,18 @@ cd /opt/aio-proxy
 ./manage.sh logs
 ```
 
+`./manage.sh` 无参数会进入与 `install.sh` 相同的交互控制台，便于后续维护（含卸载删除）。
+
 修改 BasicAuth：
 
 ```bash
 ./manage.sh set-credentials NEW_USER NEW_PASS
+```
+
+卸载删除：
+
+```bash
+./manage.sh uninstall
 ```
 
 修改对外端口：

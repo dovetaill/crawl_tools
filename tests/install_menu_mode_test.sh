@@ -151,4 +151,52 @@ if ! rg -n '新端口已被占用，请更换。' ./install.sh >/dev/null 2>&1; 
 fi
 pass "port occupancy validation is wired for quick, one-click and manual flows"
 
+# Test 14: generated manage.sh should default to menu mode and proxy to install.sh interactive console
+if ! rg -n 'case "\$\{1:-menu\}" in' ./install.sh >/dev/null 2>&1; then
+  fail "generated manage.sh is not defaulting to menu mode"
+fi
+if ! rg -n '"\$0" install-menu' ./install.sh >/dev/null 2>&1; then
+  fail "generated manage.sh missing self-dispatch install-menu entry"
+fi
+if ! rg -n 'exec bash \./install\.sh' ./install.sh >/dev/null 2>&1; then
+  fail "generated manage.sh missing install.sh interactive delegation"
+fi
+pass "generated manage.sh defaults to install-like interactive menu"
+
+# Test 15: manage command compatibility should keep legacy subcommands and include uninstall
+if ! rg -n 'start\|up\)' ./install.sh >/dev/null 2>&1; then
+  fail "generated manage.sh missing start/up subcommand"
+fi
+if ! rg -n 'set-credentials\)' ./install.sh >/dev/null 2>&1; then
+  fail "generated manage.sh missing set-credentials subcommand"
+fi
+if ! rg -n 'uninstall\)' ./install.sh >/dev/null 2>&1; then
+  fail "generated manage.sh missing uninstall subcommand"
+fi
+if ! rg -n '用法: \$0 \{menu\|start\|stop\|restart\|ps\|logs\|set-credentials <user> <pass>\|uninstall\}' ./install.sh >/dev/null 2>&1; then
+  fail "generated manage.sh usage is not documenting compatibility and uninstall"
+fi
+pass "manage compatibility commands and uninstall command are documented"
+
+# Test 16: installer should copy install scripts to /opt/aio-proxy for runtime menu maintenance
+if ! rg -n '^write_runtime_install_scripts\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing runtime install script copy helper"
+fi
+if ! rg -n 'write_runtime_install_scripts' ./install.sh >/dev/null 2>&1; then
+  fail "perform_install is not invoking runtime install script copy helper"
+fi
+pass "runtime install scripts are prepared in install target dir"
+
+# Test 17: README should document no-arg manage menu and uninstall command
+if ! rg -n '^\./manage\.sh$' ./README.md >/dev/null 2>&1; then
+  fail "README missing no-arg manage menu command"
+fi
+if ! rg -n '与 `install\.sh` 相同的交互控制台' ./README.md >/dev/null 2>&1; then
+  fail "README missing manage/install interactive parity note"
+fi
+if ! rg -n '^\./manage\.sh uninstall$' ./README.md >/dev/null 2>&1; then
+  fail "README missing manage uninstall command"
+fi
+pass "README documents manage menu parity and uninstall"
+
 echo "All tests passed"

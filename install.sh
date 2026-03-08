@@ -1059,7 +1059,45 @@ detect_compose_bin() {
 COMPOSE_BIN="$(detect_compose_bin)"
 compose_cmd=($COMPOSE_BIN -f docker-compose.yml)
 
-case "${1:-start}" in
+open_install_menu() {
+  if [ -x "./install.sh" ]; then
+    exec bash ./install.sh
+  fi
+  echo "[manage] 未找到 ./install.sh，无法进入完整交互控制台。"
+  echo "[manage] 可改为使用子命令维护：start/stop/restart/ps/logs/set-credentials/uninstall"
+  exit 1
+}
+
+uninstall_runtime() {
+  local assume_yes="${1:-}"
+  local answer=""
+
+  if [ "${assume_yes}" != "--yes" ]; then
+    echo "将停止容器并删除 /opt/aio-proxy。"
+    read -r -p "确认继续？[y/N]: " answer || true
+    answer="$(echo "${answer:-}" | tr '[:upper:]' '[:lower:]')"
+    case "${answer}" in
+      y|yes) ;;
+      *)
+        echo "[manage] 已取消卸载。"
+        return 0
+        ;;
+    esac
+  fi
+
+  "${compose_cmd[@]}" down -v --remove-orphans || true
+  cd /
+  rm -rf /opt/aio-proxy
+  echo "[manage] 卸载完成。"
+}
+
+case "${1:-menu}" in
+  menu|"")
+    "$0" install-menu
+    ;;
+  install-menu)
+    open_install_menu
+    ;;
   start|up)
     "${compose_cmd[@]}" up -d flaresolverr edge
     ;;
@@ -1088,15 +1126,38 @@ case "${1:-start}" in
     echo "[manage] 已更新 flaresolverr 凭据，重启 edge ..."
     ${COMPOSE_BIN} restart edge
     ;;
+  uninstall)
+    uninstall_runtime "${2:-}"
+    ;;
   *)
     cat <<USAGE
-用法: $0 {start|stop|restart|ps|logs|set-credentials <user> <pass>}
+用法: $0 {menu|start|stop|restart|ps|logs|set-credentials <user> <pass>|uninstall}
+  $0 menu            # 进入与 install.sh 相同的交互控制台
+  $0 uninstall       # 交互确认后删除 /opt/aio-proxy
+  $0 uninstall --yes # 非交互卸载
 USAGE
     exit 1
     ;;
 esac
 EOF_MANAGE
   chmod +x "${APP_DIR}/manage.sh"
+}
+
+write_runtime_install_scripts() {
+  local source_install="${SCRIPT_DIR}/install.sh"
+  local source_docker_install="${SCRIPT_DIR}/install_docker.sh"
+
+  if [ -f "${source_install}" ]; then
+    cp "${source_install}" "${APP_DIR}/install.sh"
+    chmod +x "${APP_DIR}/install.sh"
+  else
+    echo "[install] 未检测到源 install.sh，跳过拷贝到 ${APP_DIR}/install.sh。"
+  fi
+
+  if [ -f "${source_docker_install}" ]; then
+    cp "${source_docker_install}" "${APP_DIR}/install_docker.sh"
+    chmod +x "${APP_DIR}/install_docker.sh"
+  fi
 }
 
 perform_install() {
@@ -1147,6 +1208,7 @@ perform_install() {
   write_nginx_conf
   write_compose_file
   write_manage_script
+  write_runtime_install_scripts
 
   # ===== 启动服务 =====
   cd "${APP_DIR}"
@@ -1158,8 +1220,10 @@ perform_install() {
   echo "访问账号     ： ${flare_user}"
   echo "访问密码     ： ${flare_pass}"
   echo "说明         ：若账号/密码为自动生成，请立即保存。"
+  echo "交互控制台   ： cd ${APP_DIR} && ./manage.sh"
   echo "改密码       ： cd ${APP_DIR} && ./manage.sh set-credentials <user> <pass>"
   echo "启停/日志    ： cd ${APP_DIR} && ./manage.sh {start|stop|restart|ps|logs}"
+  echo "卸载删除     ： cd ${APP_DIR} && ./manage.sh uninstall"
   echo "${UI_GREEN}==================================================${UI_RESET}"
 }
 
