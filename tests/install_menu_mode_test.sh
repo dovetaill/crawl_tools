@@ -22,7 +22,7 @@ set -e
 if [ "$status" -ne 0 ]; then
   fail "expected no-arg menu exit code 0, got $status; output=$output"
 fi
-if [[ "$output" != *"AIO Proxy 管理菜单"* ]]; then
+if [[ "$output" != *"AIO Proxy 控制台"* ]]; then
   fail "expected menu title in output, got: $output"
 fi
 pass "no-arg mode enters menu and exits cleanly"
@@ -45,5 +45,62 @@ if rg -n 'read -r -s -p "\$prompt" value' ./install.sh >/dev/null 2>&1; then
   fail "password input is still hidden; expected visible input prompt"
 fi
 pass "password input prompt is visible"
+
+# Test 4: install.sh should provide random generation helpers for menu install flow
+if ! rg -n '^generate_random_username\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing generate_random_username helper"
+fi
+if ! rg -n '^generate_random_password\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing generate_random_password helper"
+fi
+if ! rg -n '^generate_random_port\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing generate_random_port helper"
+fi
+pass "random generation helpers exist"
+
+# Test 5: menu prompts should clearly explain auto-generation when input is empty
+if ! rg -n '留空自动生成' ./install.sh >/dev/null 2>&1; then
+  fail "missing auto-generation hint in prompts"
+fi
+pass "auto-generation hints exist in prompts"
+
+# Test 6: arrow menu renderer should avoid tput sc/rc cursor save/restore redraw pattern
+if rg -n 'tput sc|tput rc' ./install.sh >/dev/null 2>&1; then
+  fail "arrow menu still uses tput sc/rc redraw path"
+fi
+pass "arrow menu redraw path avoids tput sc/rc"
+
+# Test 7: main menu should support arrow-key highlighted selection
+if ! rg -n '^select_main_menu_with_arrow\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing arrow-key selector for main menu"
+fi
+if ! rg -n 'select_main_menu_with_arrow' ./install.sh >/dev/null 2>&1; then
+  fail "main menu does not call arrow-key selector"
+fi
+if rg -n 'choice="\$\(select_main_menu_with_arrow\)"' ./install.sh >/dev/null 2>&1; then
+  fail "main menu still captures arrow renderer output via command substitution"
+fi
+pass "main menu arrow-key selector exists and is wired"
+
+# Test 8: status page should support single-screen dynamic refresh
+if ! rg -n '^status_dashboard_flow\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing status_dashboard_flow"
+fi
+if ! rg -n '状态仪表盘（自动刷新）' ./install.sh >/dev/null 2>&1; then
+  fail "main menu missing dynamic status dashboard entry"
+fi
+if ! rg -n '按键: q 返回, r 刷新, s 启动, t 停止, x 重启, l 日志' ./install.sh >/dev/null 2>&1; then
+  fail "status dashboard missing key hints"
+fi
+pass "status dashboard dynamic refresh hooks exist"
+
+# Test 9: other pages should use unified page header helper
+if ! rg -n '^render_page_header\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing render_page_header helper"
+fi
+if ! rg -n 'render_page_header "当前配置"' ./install.sh >/dev/null 2>&1; then
+  fail "show_current_config is not using unified page header"
+fi
+pass "page rendering helper is wired"
 
 echo "All tests passed"
