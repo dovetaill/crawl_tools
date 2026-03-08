@@ -13,7 +13,9 @@
 
 - 仅包含 `edge + flaresolverr` 两个服务。
 - 仅维护一套单文件编排，不含多文件叠加编排。
-- 安装脚本当前为“参数驱动 + Docker 交互确认”模式。
+- 安装脚本支持“双模式”：
+  - 无参数：进入菜单式交互控制台。
+  - 传参数：执行命令行安装流程（适合自动化）。
 
 ---
 
@@ -39,20 +41,38 @@ Internet --> edge (BasicAuth, :8081) --> flaresolverr (:8191)
 - 使用 `root`，或当前用户具备 `sudo` 能力。
 - 已克隆本仓库并进入目录：`/home/wwwroot/crawl_tools`。
 
-### 3.2 本地执行（推荐）
+### 3.2 菜单模式（推荐）
 
 ```bash
 cd /home/wwwroot/crawl_tools
 chmod +x install.sh install_docker.sh
-sudo ./install.sh admin 'StrongPass123' 36584
+sudo ./install.sh
 ```
 
-执行过程中会进入 yes/no 菜单：
+无参数会进入交互式管理菜单，可执行：
 
-- 若未检测到 Docker：默认安装 Docker。
-- 若检测到 Docker：默认不更新 Docker。
+- 查看当前配置（用户名、端口、安装状态、服务状态）
+- 全新安装 / 重装
+- 修改账号密码
+- 修改对外端口
+- 启动 / 停止 / 重启 / 查看状态 / 查看日志
+- 卸载删除服务
 
-### 3.3 非交互执行
+说明：
+
+- 密码以哈希存储，菜单不会显示明文密码。
+- Docker 安装/更新确认会进入 yes/no 选择菜单。
+
+### 3.3 参数模式（适合自动化）
+
+传参时会走 CLI 安装流程，必须提供：
+`<FLARE_USER> <FLARE_PASS> <FLARE_PORT>`
+
+交互确认 Docker（未安装默认安装，已安装默认不更新）：
+
+```bash
+sudo ./install.sh admin 'StrongPass123' 36584
+```
 
 按默认策略执行（未安装则安装，已安装则不更新）：
 
@@ -66,17 +86,39 @@ sudo ./install.sh --yes admin 'StrongPass123' 36584
 sudo ./install.sh --yes --update-docker admin 'StrongPass123' 36584
 ```
 
-### 3.4 远程拉取安装脚本（可选）
+### 3.4 远程拉取脚本执行（可选）
+
+菜单模式（无参数）：
 
 ```bash
 sudo bash -c '
-  set -e
-  SCRIPT_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh"
-  SCRIPT_PATH="/tmp/install_aio_proxy.sh"
-  curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_PATH"
-  chmod +x "$SCRIPT_PATH"
-  "$SCRIPT_PATH" --yes admin "StrongPass123" 36584
-  rm -f "$SCRIPT_PATH"
+  set -euo pipefail
+  BASE_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master"
+  TMP_DIR="$(mktemp -d /tmp/aio-proxy.XXXXXX)"
+
+  curl -fsSL "$BASE_URL/install.sh" -o "$TMP_DIR/install.sh"
+  curl -fsSL "$BASE_URL/install_docker.sh" -o "$TMP_DIR/install_docker.sh"
+  chmod +x "$TMP_DIR/install.sh" "$TMP_DIR/install_docker.sh"
+
+  "$TMP_DIR/install.sh"
+  rm -rf "$TMP_DIR"
+'
+```
+
+参数模式（示例：非交互默认策略）：
+
+```bash
+sudo bash -c '
+  set -euo pipefail
+  BASE_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master"
+  TMP_DIR="$(mktemp -d /tmp/aio-proxy.XXXXXX)"
+
+  curl -fsSL "$BASE_URL/install.sh" -o "$TMP_DIR/install.sh"
+  curl -fsSL "$BASE_URL/install_docker.sh" -o "$TMP_DIR/install_docker.sh"
+  chmod +x "$TMP_DIR/install.sh" "$TMP_DIR/install_docker.sh"
+
+  "$TMP_DIR/install.sh" --yes admin "StrongPass123" 36584
+  rm -rf "$TMP_DIR"
 '
 ```
 
@@ -89,6 +131,12 @@ sudo bash -c '
 ```bash
 install.sh [--yes] [--update-docker] <FLARE_USER> <FLARE_PASS> <FLARE_PORT>
 ```
+
+```bash
+install.sh
+```
+
+无参数时进入菜单式交互控制台。
 
 参数说明：
 
@@ -114,9 +162,26 @@ bash install_docker.sh --help
 
 ---
 
-## 5. 交互菜单说明（方向键 + 回退）
+## 5. 交互说明（菜单 + yes/no）
 
-`install.sh` 的确认菜单支持：
+### 5.1 主菜单（无参数进入）
+
+```bash
+sudo ./install.sh
+```
+
+菜单项包含：
+
+- 查看当前配置
+- 全新安装 / 重装
+- 修改账号密码
+- 修改对外端口
+- 启动 / 停止 / 重启 / 查看状态 / 查看日志
+- 卸载删除服务
+
+### 5.2 yes/no 确认菜单（Docker 安装/更新）
+
+Docker 检测阶段的确认菜单支持：
 
 - `↑/↓`：切换选项
 - `Enter`：确认
@@ -251,7 +316,13 @@ sudo ./install_docker.sh --action update
 
 原因：终端不支持 `tput` 或非 TTY 场景。
 
-处理：脚本会自动回退到数字输入；也可直接使用 `--yes`。
+处理：脚本会自动回退到数字输入；参数模式也可直接使用 `--yes`。
+
+### 9.5 `[install] 未找到 Docker 安装器`
+
+原因：只下载了 `install.sh`，未与 `install_docker.sh` 放在同一目录。
+
+处理：按 3.4 示例同时下载 `install.sh` 和 `install_docker.sh` 后再执行。
 
 ---
 
@@ -291,5 +362,6 @@ docker network rm aio-proxy-net 2>/dev/null || true
 - `2026-03-08`
 - 安装流程收敛为 `edge + flaresolverr`。
 - 文档改为参考手册结构。
+- 新增 `install.sh` 无参数菜单模式，可直接查看/修改配置与管理服务。
 - Docker 安装策略支持交互确认与参数覆盖（`--yes` / `--update-docker`）。
 - 交互确认支持方向键菜单，非兼容终端自动回退数字输入。
