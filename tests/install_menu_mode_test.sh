@@ -40,4 +40,10 @@ if [[ "$output2" != *"用法:"* ]]; then
 fi
 pass "cli mode argument validation still works"
 
+# Test 3: password prompt should be visible (not silent `read -s`)
+if rg -n 'read -r -s -p "\$prompt" value' ./install.sh >/dev/null 2>&1; then
+  fail "password input is still hidden; expected visible input prompt"
+fi
+pass "password input prompt is visible"
+
 echo "All tests passed"

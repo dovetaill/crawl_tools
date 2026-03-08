@@ -213,8 +213,7 @@ read_password_non_empty() {
   local prompt="$1"
   local value=""
   while true; do
-    read -r -s -p "$prompt" value || true
-    echo
+    read -r -p "$prompt" value || true
     if [ -n "${value:-}" ]; then
       printf '%s' "$value"
       return 0
