@@ -9,7 +9,14 @@ NGX_DIR="${APP_DIR}/nginx"
 HT_FLARE="${NGX_DIR}/htpasswd_flaresolverr"
 ENV_FILE="${APP_DIR}/.env"
 TZ_DEFAULT="Europe/Berlin"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REMOTE_INSTALL_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh"
+REMOTE_DOCKER_INSTALL_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install_docker.sh"
+SCRIPT_PATH="${BASH_SOURCE[0]-}"
+if [ -n "${SCRIPT_PATH}" ] && [ -f "${SCRIPT_PATH}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
+else
+  SCRIPT_DIR="$(pwd)"
+fi
 
 # ===== 参数校验 =====
 usage() {
@@ -1146,17 +1153,34 @@ EOF_MANAGE
 write_runtime_install_scripts() {
   local source_install="${SCRIPT_DIR}/install.sh"
   local source_docker_install="${SCRIPT_DIR}/install_docker.sh"
+  local target_install="${APP_DIR}/install.sh"
+  local target_docker_install="${APP_DIR}/install_docker.sh"
 
-  if [ -f "${source_install}" ]; then
-    cp "${source_install}" "${APP_DIR}/install.sh"
-    chmod +x "${APP_DIR}/install.sh"
+  if [ -f "${source_install}" ] && cp "${source_install}" "${target_install}"; then
+    chmod +x "${target_install}"
+  elif curl -fsSL "${REMOTE_INSTALL_URL}" -o "${target_install}"; then
+    chmod +x "${target_install}"
+    echo "[install] 已从远端补充 ${target_install}。"
   else
-    echo "[install] 未检测到源 install.sh，跳过拷贝到 ${APP_DIR}/install.sh。"
+    cat > "${target_install}" <<'EOF_INSTALL_STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+REMOTE_INSTALL_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh"
+TMP_SCRIPT="$(mktemp /tmp/aio-proxy-install.XXXXXX.sh)"
+trap 'rm -f "${TMP_SCRIPT}"' EXIT
+curl -fsSL "${REMOTE_INSTALL_URL}" -o "${TMP_SCRIPT}"
+chmod +x "${TMP_SCRIPT}"
+exec bash "${TMP_SCRIPT}" "$@"
+EOF_INSTALL_STUB
+    chmod +x "${target_install}"
+    echo "[install] 本地源缺失且远端下载失败，已写入 ${target_install} 引导脚本。"
   fi
 
-  if [ -f "${source_docker_install}" ]; then
-    cp "${source_docker_install}" "${APP_DIR}/install_docker.sh"
-    chmod +x "${APP_DIR}/install_docker.sh"
+  if [ -f "${source_docker_install}" ] && cp "${source_docker_install}" "${target_docker_install}"; then
+    chmod +x "${target_docker_install}"
+  elif curl -fsSL "${REMOTE_DOCKER_INSTALL_URL}" -o "${target_docker_install}"; then
+    chmod +x "${target_docker_install}"
+    echo "[install] 已从远端补充 ${target_docker_install}。"
   fi
 }
 
