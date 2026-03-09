@@ -154,6 +154,19 @@ setup_ui_palette() {
 }
 setup_ui_palette
 
+read_prompt_with_editing() {
+  local prompt="$1"
+  local value=""
+
+  if [ -t 0 ]; then
+    read -e -r -p "$prompt" value || true
+  else
+    read -r -p "$prompt" value || true
+  fi
+
+  printf '%s' "$value"
+}
+
 confirm_with_number_input() {
   local prompt="$1"
   local default_choice="$2"
@@ -168,7 +181,7 @@ confirm_with_number_input() {
   echo "  1) yes"
   echo "  2) no"
   while true; do
-    read -r -p "请输入序号 [${default_index}]（q 退出）: " answer || true
+    answer="$(read_prompt_with_editing "请输入序号 [${default_index}]（q 退出）: ")"
     answer="$(echo "${answer:-}" | tr '[:upper:]' '[:lower:]')"
     if [ -z "$answer" ]; then
       [ "$default_index" = "1" ] && return 0 || return 1
@@ -295,7 +308,7 @@ read_password_non_empty() {
   local prompt="$1"
   local value=""
   while true; do
-    read -r -p "$prompt" value || true
+    value="$(read_prompt_with_editing "$prompt")"
     if [ -n "${value:-}" ]; then
       printf '%s' "$value"
       return 0
@@ -309,7 +322,7 @@ read_port_with_default() {
   local default_port="$2"
   local port_input=""
   while true; do
-    read -r -p "$prompt [$default_port]: " port_input || true
+    port_input="$(read_prompt_with_editing "$prompt [$default_port]: ")"
     port_input="${port_input:-$default_port}"
     if validate_port "$port_input"; then
       printf '%s' "$port_input"
@@ -472,7 +485,7 @@ install_or_reinstall_flow() {
   random_pass="$(generate_random_password)"
   random_port="$(generate_random_port)"
 
-  read -r -p "请输入 BasicAuth 用户名（留空自动生成） [${random_user}]: " user_input || true
+  user_input="$(read_prompt_with_editing "请输入 BasicAuth 用户名（留空自动生成） [${random_user}]: ")"
   if [ -n "${user_input:-}" ]; then
     user="$user_input"
   else
@@ -480,7 +493,7 @@ install_or_reinstall_flow() {
     echo "[menu] 未输入用户名，已自动生成: ${user}"
   fi
 
-  read -r -p "请输入 BasicAuth 密码（留空自动生成） [按回车自动生成]: " pass_input || true
+  pass_input="$(read_prompt_with_editing "请输入 BasicAuth 密码（留空自动生成） [按回车自动生成]: ")"
   if [ -n "${pass_input:-}" ]; then
     pass="$pass_input"
   else
@@ -489,7 +502,7 @@ install_or_reinstall_flow() {
   fi
 
   while true; do
-    read -r -p "请输入对外端口（留空自动生成） [${random_port}]: " port_input || true
+    port_input="$(read_prompt_with_editing "请输入对外端口（留空自动生成） [${random_port}]: ")"
     if [ -z "${port_input:-}" ]; then
       port="$random_port"
       echo "[menu] 未输入端口，已自动生成: ${port}"
@@ -521,7 +534,7 @@ update_credentials_flow() {
     return 1
   fi
 
-  read -r -p "请输入新用户名 [admin]: " user || true
+  user="$(read_prompt_with_editing "请输入新用户名 [admin]: ")"
   user="${user:-admin}"
   pass="$(read_password_non_empty '请输入新密码: ')"
 
@@ -589,7 +602,7 @@ uninstall_flow() {
 
 pause_enter() {
   if is_interactive_terminal; then
-    read -r -p "按 Enter 返回菜单..." _ || true
+    read_prompt_with_editing "按 Enter 返回菜单..." >/dev/null
   fi
 }
 
@@ -638,7 +651,7 @@ status_dashboard_flow() {
 
   while true; do
     status_dashboard_snapshot
-    read -r -p "请选择操作 [0-5]: " choice || true
+    choice="$(read_prompt_with_editing "请选择操作 [0-5]: ")"
     case "${choice:-}" in
       0|q|Q|exit|quit)
         return 0
@@ -706,7 +719,7 @@ menu_mode() {
 
   while true; do
     print_main_menu_numbered
-    read -r -p "请选择操作 [0-10]: " choice || true
+    choice="$(read_prompt_with_editing "请选择操作 [0-10]: ")"
 
     case "$choice" in
       1)
@@ -877,7 +890,11 @@ uninstall_runtime() {
 
   if [ "${assume_yes}" != "--yes" ]; then
     echo "将停止容器并删除 /opt/aio-proxy。"
-    read -r -p "确认继续？[y/N]: " answer || true
+    if [ -t 0 ]; then
+      read -e -r -p "确认继续？[y/N]: " answer || true
+    else
+      read -r -p "确认继续？[y/N]: " answer || true
+    fi
     answer="$(echo "${answer:-}" | tr '[:upper:]' '[:lower:]')"
     case "${answer}" in
       y|yes) ;;

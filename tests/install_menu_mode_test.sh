@@ -64,6 +64,31 @@ if ! rg -n '留空自动生成' ./install.sh >/dev/null 2>&1; then
 fi
 pass "auto-generation hints exist in prompts"
 
+# Test 5b: interactive prompts should use a shared editable-input helper
+helper_block="$(sed -n '/^read_prompt_with_editing()/,/^}/p' ./install.sh)"
+if ! rg -n '^read_prompt_with_editing\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing read_prompt_with_editing helper"
+fi
+if [[ "$helper_block" != *"if [ -t 0 ]; then"* ]]; then
+  fail "editable prompt helper is not checking stdin tty availability"
+fi
+if [[ "$helper_block" == *"is_interactive_terminal"* ]]; then
+  fail "editable prompt helper should not require stdout to be a tty"
+fi
+if [[ "$helper_block" != *'read -e -r -p "$prompt" value'* ]]; then
+  fail "editable prompt helper is not using readline-enabled input"
+fi
+if ! rg -n 'read_prompt_with_editing "请输入 BasicAuth 用户名（留空自动生成） \[\$\{random_user\}\]: "' ./install.sh >/dev/null 2>&1; then
+  fail "basic auth username prompt is not using editable input helper"
+fi
+if ! rg -n 'read_prompt_with_editing "请输入 BasicAuth 密码（留空自动生成） \[按回车自动生成\]: "' ./install.sh >/dev/null 2>&1; then
+  fail "basic auth password prompt is not using editable input helper"
+fi
+if ! rg -n 'read_prompt_with_editing "请输入对外端口（留空自动生成） \[\$\{random_port\}\]: "' ./install.sh >/dev/null 2>&1; then
+  fail "install port prompt is not using editable input helper"
+fi
+pass "interactive prompts use editable input helper"
+
 # Test 6: menu interaction should be numeric-only and avoid arrow-key/TUI helpers
 if rg -n '^confirm_with_arrow_menu\(\)|^select_main_menu_with_arrow\(\)|^can_use_arrow_menu\(\)|^menu_cleanup\(\)' ./install.sh >/dev/null 2>&1; then
   fail "install.sh still contains arrow-menu helper functions"
