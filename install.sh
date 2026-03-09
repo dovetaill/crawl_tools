@@ -136,10 +136,6 @@ is_interactive_terminal() {
   [ -t 0 ] && [ -t 1 ]
 }
 
-can_use_arrow_menu() {
-  is_interactive_terminal && command -v tput >/dev/null 2>&1 && [ "${TERM:-dumb}" != "dumb" ]
-}
-
 setup_ui_palette() {
   UI_RESET=""
   UI_BOLD=""
@@ -157,11 +153,6 @@ setup_ui_palette() {
   fi
 }
 setup_ui_palette
-
-menu_cleanup() {
-  tput cnorm >/dev/null 2>&1 || true
-  tput sgr0 >/dev/null 2>&1 || true
-}
 
 confirm_with_number_input() {
   local prompt="$1"
@@ -196,99 +187,10 @@ confirm_with_number_input() {
   done
 }
 
-confirm_with_arrow_menu() {
-  local prompt="$1"
-  local default_choice="$2"
-  local options=("yes" "no")
-  local selected=0
-  local default_index=0
-  local total_lines=4
-  local first_render="true"
-  local key=""
-  local key_rest=""
-  local idx=0
-  local prev_exit_trap=""
-
-  if [ "$default_choice" = "no" ]; then
-    default_index=1
-    selected=1
-  fi
-
-  prev_exit_trap="$(trap -p EXIT || true)"
-  trap 'menu_cleanup' EXIT
-  tput civis >/dev/null 2>&1 || true
-
-  while true; do
-    if [ "$first_render" = "false" ]; then
-      printf '\033[%dA' "$total_lines"
-    fi
-    printf '\033[2K\r%s%s%s\n' "${UI_BOLD}" "${prompt}" "${UI_RESET}"
-    for idx in "${!options[@]}"; do
-      printf '\033[2K\r'
-      if [ "$idx" -eq "$selected" ]; then
-        printf "%s> %s%s" "${UI_CYAN}" "${options[$idx]}" "${UI_RESET}"
-      else
-        printf "  %s" "${options[$idx]}"
-      fi
-      if [ "$idx" -eq "$default_index" ]; then
-        printf " %s(default)%s" "${UI_DIM}" "${UI_RESET}"
-      fi
-      printf "\n"
-    done
-    printf '\033[2K\r%s使用 ↑/↓ 选择，Enter 确认，q 退出。%s\n' "${UI_DIM}" "${UI_RESET}"
-    first_render="false"
-
-    IFS= read -rsn1 key || true
-    case "$key" in
-      "")
-        break
-        ;;
-      q|Q)
-        menu_cleanup
-        [ -n "$prev_exit_trap" ] && eval "$prev_exit_trap" || trap - EXIT
-        echo
-        echo "[install] 用户取消操作。"
-        exit 130
-        ;;
-      $'\x1b')
-        IFS= read -rsn2 -t 0.1 key_rest || true
-        key="${key}${key_rest:-}"
-        case "$key" in
-          $'\x1b[A')
-            selected=$((selected - 1))
-            if [ "$selected" -lt 0 ]; then
-              selected=$((${#options[@]} - 1))
-            fi
-            ;;
-          $'\x1b[B')
-            selected=$((selected + 1))
-            if [ "$selected" -ge "${#options[@]}" ]; then
-              selected=0
-            fi
-            ;;
-        esac
-        ;;
-    esac
-  done
-
-  menu_cleanup
-  [ -n "$prev_exit_trap" ] && eval "$prev_exit_trap" || trap - EXIT
-
-  [ "$selected" -eq 0 ]
-}
-
 confirm_with_default() {
   local prompt="$1"
   local default_choice="$2"
-
-  if can_use_arrow_menu; then
-    confirm_with_arrow_menu "$prompt" "$default_choice"
-  else
-    if ! is_interactive_terminal; then
-      echo "[install] 非 TTY 终端，回退到数字输入模式。"
-    fi
-    confirm_with_number_input "$prompt" "$default_choice"
-  fi
+  confirm_with_number_input "$prompt" "$default_choice"
 }
 
 require_root() {
@@ -704,7 +606,7 @@ status_dashboard_snapshot() {
     current_port="$(awk -F= '/^FLARE_PUBLIC_PORT=/{print $2}' "$ENV_FILE" 2>/dev/null || echo '(读取失败)')"
   fi
 
-  render_page_header "状态仪表盘（自动刷新）" "每 2 秒自动刷新，可直接在本页执行启停操作。"
+  render_page_header "状态页" "使用数字选择刷新或服务操作。"
   echo "安装状态      : $(app_installed && echo 已安装 || echo 未安装)"
   echo "Docker 状态    : ${docker_state}"
   echo "用户名         : ${current_user}"
@@ -721,57 +623,59 @@ status_dashboard_snapshot() {
     echo "${UI_YELLOW}${STATUS_LAST_ACTION_MSG}${UI_RESET}"
   fi
   echo
-  echo "${UI_DIM}按键: q 返回, r 刷新, s 启动, t 停止, x 重启, l 日志${UI_RESET}"
+  echo " 1) 刷新"
+  echo " 2) 启动服务"
+  echo " 3) 停止服务"
+  echo " 4) 重启服务"
+  echo " 5) 查看实时日志"
+  echo " 0) 返回上一级"
   render_page_footer
 }
 
 status_dashboard_flow() {
-  local key=""
+  local choice=""
   STATUS_LAST_ACTION_MSG=""
-
-  if ! can_use_arrow_menu; then
-    status_dashboard_snapshot
-    pause_enter
-    return 0
-  fi
 
   while true; do
     status_dashboard_snapshot
-    IFS= read -rsn1 -t 2 key || true
-    case "${key:-}" in
-      q|Q)
+    read -r -p "请选择操作 [0-5]: " choice || true
+    case "${choice:-}" in
+      0|q|Q|exit|quit)
         return 0
         ;;
-      r|R|"")
+      1|"")
         ;;
-      s|S)
+      2)
         if run_manage start >/dev/null 2>&1; then
           STATUS_LAST_ACTION_MSG="[status] 已执行启动。"
         else
           STATUS_LAST_ACTION_MSG="[status] 启动失败，请检查日志。"
         fi
         ;;
-      t|T)
+      3)
         if run_manage stop >/dev/null 2>&1; then
           STATUS_LAST_ACTION_MSG="[status] 已执行停止。"
         else
           STATUS_LAST_ACTION_MSG="[status] 停止失败，请检查日志。"
         fi
         ;;
-      x|X)
+      4)
         if run_manage restart >/dev/null 2>&1; then
           STATUS_LAST_ACTION_MSG="[status] 已执行重启。"
         else
           STATUS_LAST_ACTION_MSG="[status] 重启失败，请检查日志。"
         fi
         ;;
-      l|L)
+      5)
         if app_installed; then
           run_manage logs || true
           STATUS_LAST_ACTION_MSG="[status] 已退出日志查看。"
         else
           STATUS_LAST_ACTION_MSG="[status] 未安装服务，无法查看日志。"
         fi
+        ;;
+      *)
+        STATUS_LAST_ACTION_MSG="[status] 无效选项，请输入 0-5。"
         ;;
     esac
   done
@@ -790,127 +694,19 @@ print_main_menu_numbered() {
   echo " 5) 启动服务"
   echo " 6) 停止服务"
   echo " 7) 重启服务"
-  echo " 8) 状态仪表盘（自动刷新）"
+  echo " 8) 状态页"
   echo " 9) 查看实时日志"
   echo "10) 卸载删除服务"
   echo " 0) 退出"
   echo "${UI_CYAN}============================================================${UI_RESET}"
 }
 
-select_main_menu_with_arrow() {
-  local -a labels=(
-    "查看当前配置"
-    "全新安装 / 重装"
-    "修改账号密码"
-    "修改对外端口"
-    "启动服务"
-    "停止服务"
-    "重启服务"
-    "状态仪表盘（自动刷新）"
-    "查看实时日志"
-    "卸载删除服务"
-    "退出"
-  )
-  local -a codes=(1 2 3 4 5 6 7 8 9 10 0)
-  local selected=0
-  local first_render="true"
-  local total_lines=$((4 + ${#labels[@]} + 2))
-  local key=""
-  local key_rest=""
-  local idx=0
-  local prev_exit_trap=""
-
-  prev_exit_trap="$(trap -p EXIT || true)"
-  trap 'menu_cleanup' EXIT
-  tput civis >/dev/null 2>&1 || true
-
-  while true; do
-    if [ "$first_render" = "false" ]; then
-      printf '\033[%dA' "$total_lines"
-    fi
-    printf '\033[2K\r%s============================================================%s\n' "${UI_CYAN}" "${UI_RESET}"
-    printf '\033[2K\r%s AIO Proxy 控制台%s\n' "${UI_BOLD}" "${UI_RESET}"
-    printf '\033[2K\r%s 说明: 账号/密码/端口支持留空自动生成%s\n' "${UI_DIM}" "${UI_RESET}"
-    printf '\033[2K\r%s------------------------------------------------------------%s\n' "${UI_CYAN}" "${UI_RESET}"
-    for idx in "${!labels[@]}"; do
-      printf '\033[2K\r'
-      if [ "$idx" -eq "$selected" ]; then
-        printf "%s> %2d) %s%s" "${UI_CYAN}" "${codes[$idx]}" "${labels[$idx]}" "${UI_RESET}"
-      else
-        printf "  %2d) %s" "${codes[$idx]}" "${labels[$idx]}"
-      fi
-      printf '\n'
-    done
-    printf '\033[2K\r%s使用 ↑/↓ 选择，Enter 执行，数字直达，q 退出。%s\n' "${UI_DIM}" "${UI_RESET}"
-    printf '\033[2K\r%s============================================================%s\n' "${UI_CYAN}" "${UI_RESET}"
-    first_render="false"
-
-    IFS= read -rsn1 key || true
-    case "$key" in
-      "")
-        break
-        ;;
-      q|Q)
-        selected=$((${#labels[@]} - 1))
-        break
-        ;;
-      [0-9])
-        if [ "$key" = "0" ]; then
-          selected=$((${#labels[@]} - 1))
-          break
-        fi
-        if [ "$key" = "1" ]; then
-          IFS= read -rsn1 -t 0.15 key_rest || true
-          if [ "${key_rest:-}" = "0" ]; then
-            selected=9
-            break
-          fi
-        fi
-        if [ "$key" -ge 1 ] && [ "$key" -le 9 ]; then
-          selected=$((key - 1))
-          break
-        fi
-        ;;
-      $'\x1b')
-        IFS= read -rsn2 -t 0.1 key_rest || true
-        key="${key}${key_rest:-}"
-        case "$key" in
-          $'\x1b[A')
-            selected=$((selected - 1))
-            if [ "$selected" -lt 0 ]; then
-              selected=$((${#labels[@]} - 1))
-            fi
-            ;;
-          $'\x1b[B')
-            selected=$((selected + 1))
-            if [ "$selected" -ge "${#labels[@]}" ]; then
-              selected=0
-            fi
-            ;;
-        esac
-        ;;
-    esac
-  done
-
-  menu_cleanup
-  [ -n "$prev_exit_trap" ] && eval "$prev_exit_trap" || trap - EXIT
-  MAIN_MENU_SELECTION="${codes[$selected]}"
-  return 0
-}
-
 menu_mode() {
   local choice=""
 
   while true; do
-    if can_use_arrow_menu; then
-      MAIN_MENU_SELECTION=""
-      select_main_menu_with_arrow
-      choice="${MAIN_MENU_SELECTION}"
-      echo
-    else
-      print_main_menu_numbered
-      read -r -p "请选择操作: " choice || true
-    fi
+    print_main_menu_numbered
+    read -r -p "请选择操作 [0-10]: " choice || true
 
     case "$choice" in
       1)

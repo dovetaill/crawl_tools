@@ -64,35 +64,41 @@ if ! rg -n '留空自动生成' ./install.sh >/dev/null 2>&1; then
 fi
 pass "auto-generation hints exist in prompts"
 
-# Test 6: arrow menu renderer should avoid tput sc/rc cursor save/restore redraw pattern
-if rg -n 'tput sc|tput rc' ./install.sh >/dev/null 2>&1; then
-  fail "arrow menu still uses tput sc/rc redraw path"
+# Test 6: menu interaction should be numeric-only and avoid arrow-key/TUI helpers
+if rg -n '^confirm_with_arrow_menu\(\)|^select_main_menu_with_arrow\(\)|^can_use_arrow_menu\(\)|^menu_cleanup\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "install.sh still contains arrow-menu helper functions"
 fi
-pass "arrow menu redraw path avoids tput sc/rc"
+if rg -n 'read -rsn1|read -rsn2 -t|tput civis|tput cnorm' ./install.sh >/dev/null 2>&1; then
+  fail "install.sh still depends on single-key arrow or cursor-hiding terminal control"
+fi
+pass "menu interaction is numeric-only"
 
-# Test 7: main menu should support arrow-key highlighted selection
-if ! rg -n '^select_main_menu_with_arrow\(\)' ./install.sh >/dev/null 2>&1; then
-  fail "missing arrow-key selector for main menu"
+# Test 7: main menu should stay numbered and exit with numeric input
+if ! rg -n '^print_main_menu_numbered\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing numbered main menu renderer"
 fi
-if ! rg -n 'select_main_menu_with_arrow' ./install.sh >/dev/null 2>&1; then
-  fail "main menu does not call arrow-key selector"
+if ! rg -n '请选择操作' ./install.sh >/dev/null 2>&1; then
+  fail "main menu is missing numeric input prompt"
 fi
-if rg -n 'choice="\$\(select_main_menu_with_arrow\)"' ./install.sh >/dev/null 2>&1; then
-  fail "main menu still captures arrow renderer output via command substitution"
+if rg -n '使用 ↑/↓ 选择，Enter 执行，数字直达，q 退出。' ./install.sh >/dev/null 2>&1; then
+  fail "main menu still documents arrow-key navigation"
 fi
-pass "main menu arrow-key selector exists and is wired"
+pass "main menu uses numeric input"
 
-# Test 8: status page should support single-screen dynamic refresh
+# Test 8: status page should use numeric actions instead of auto-refresh hotkeys
 if ! rg -n '^status_dashboard_flow\(\)' ./install.sh >/dev/null 2>&1; then
   fail "missing status_dashboard_flow"
 fi
-if ! rg -n '状态仪表盘（自动刷新）' ./install.sh >/dev/null 2>&1; then
-  fail "main menu missing dynamic status dashboard entry"
+if ! rg -n '状态页' ./install.sh >/dev/null 2>&1; then
+  fail "main menu missing numeric status page entry"
 fi
-if ! rg -n '按键: q 返回, r 刷新, s 启动, t 停止, x 重启, l 日志' ./install.sh >/dev/null 2>&1; then
-  fail "status dashboard missing key hints"
+if ! rg -n '1\) 刷新|2\) 启动服务|3\) 停止服务|4\) 重启服务|5\) 查看实时日志|0\) 返回上一级' ./install.sh >/dev/null 2>&1; then
+  fail "status page is missing numeric action hints"
 fi
-pass "status dashboard dynamic refresh hooks exist"
+if rg -n '状态仪表盘（自动刷新）|按键: q 返回, r 刷新, s 启动, t 停止, x 重启, l 日志|每 2 秒自动刷新' ./install.sh >/dev/null 2>&1; then
+  fail "status page still contains auto-refresh or hotkey copy"
+fi
+pass "status page uses numeric actions"
 
 # Test 9: other pages should use unified page header helper
 if ! rg -n '^render_page_header\(\)' ./install.sh >/dev/null 2>&1; then
