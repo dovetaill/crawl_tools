@@ -41,6 +41,12 @@ ASSUME_YES="false"
 FORCE_UPDATE_DOCKER="false"
 QUICK_MODE="false"
 POSITIONAL_ARGS=()
+HOST_OS_CACHE=""
+PKG_MANAGER_CACHE=""
+OS_RELEASE_LOADED="false"
+OS_RELEASE_ID=""
+OS_RELEASE_ID_LIKE=""
+OS_RELEASE_VERSION_CODENAME=""
 
 detect_host_timezone() {
   local tz=""
@@ -76,7 +82,93 @@ detect_host_timezone() {
   printf '%s\n' "${TZ_FALLBACK_DEFAULT}"
 }
 
-# ===== APT 锁等待 & 包管理辅助 =====
+# ===== 平台识别 / 包管理辅助 =====
+get_uname_s() {
+  if [ -n "${AIO_TEST_UNAME_S:-}" ]; then
+    printf '%s\n' "${AIO_TEST_UNAME_S}"
+    return 0
+  fi
+  uname -s
+}
+
+detect_host_os() {
+  local uname_s=""
+  uname_s="$(get_uname_s | tr '[:upper:]' '[:lower:]')"
+  case "$uname_s" in
+    linux*) printf '%s\n' "linux" ;;
+    darwin*) printf '%s\n' "darwin" ;;
+    *) printf '%s\n' "$uname_s" ;;
+  esac
+}
+
+load_os_release() {
+  if [ "${OS_RELEASE_LOADED}" = "true" ]; then
+    return 0
+  fi
+
+  if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS_RELEASE_ID="${ID:-}"
+    OS_RELEASE_ID_LIKE="${ID_LIKE:-}"
+    OS_RELEASE_VERSION_CODENAME="${VERSION_CODENAME:-}"
+  fi
+  OS_RELEASE_LOADED="true"
+}
+
+detect_package_manager() {
+  if [ -n "${PKG_MANAGER_CACHE:-}" ]; then
+    printf '%s\n' "${PKG_MANAGER_CACHE}"
+    return 0
+  fi
+
+  if [ -n "${AIO_TEST_PACKAGE_MANAGER:-}" ]; then
+    PKG_MANAGER_CACHE="${AIO_TEST_PACKAGE_MANAGER}"
+    printf '%s\n' "${PKG_MANAGER_CACHE}"
+    return 0
+  fi
+
+  local candidate=""
+  for candidate in apt-get dnf yum zypper pacman apk; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      PKG_MANAGER_CACHE="${candidate}"
+      printf '%s\n' "${PKG_MANAGER_CACHE}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_supported_host() {
+  local host_os=""
+  local pkg_manager=""
+
+  host_os="$(detect_host_os)"
+  HOST_OS_CACHE="${host_os}"
+
+  case "${host_os}" in
+    linux)
+      if ! pkg_manager="$(detect_package_manager)"; then
+        echo "[install] 检测到 Linux，但未识别到受支持的包管理器。"
+        echo "[install] 当前支持: apt / dnf / yum / zypper / pacman / apk"
+        exit 1
+      fi
+      PKG_MANAGER_CACHE="${pkg_manager}"
+      return 0
+      ;;
+    darwin)
+      echo "[install] 检测到 macOS。当前脚本仅支持 Linux 各发行版原生安装。"
+      echo "[install] macOS 仅提供环境检测与提示，请改用 Docker Desktop 或手动部署。"
+      exit 1
+      ;;
+    *)
+      echo "[install] 当前脚本仅支持 Linux 各发行版原生安装。"
+      echo "[install] 检测到未支持系统: ${host_os}"
+      exit 1
+      ;;
+  esac
+}
+
 apt_wait_lock() {
   local lock="/var/lib/dpkg/lock-frontend"
   local i=0
@@ -97,36 +189,141 @@ apt_run() {
   DEBIAN_FRONTEND=noninteractive apt-get -y "$@"
 }
 
+pkg_update() {
+  local pkg_manager=""
+  pkg_manager="$(detect_package_manager)"
+
+  case "${pkg_manager}" in
+    apt-get)
+      apt_run update
+      ;;
+    dnf)
+      dnf -y makecache --refresh
+      ;;
+    yum)
+      yum -y makecache
+      ;;
+    zypper)
+      zypper --non-interactive --gpg-auto-import-keys refresh
+      ;;
+    pacman)
+      pacman -Sy --noconfirm
+      ;;
+    apk)
+      apk update
+      ;;
+  esac
+}
+
+pkg_install() {
+  local pkg_manager=""
+  pkg_manager="$(detect_package_manager)"
+
+  case "${pkg_manager}" in
+    apt-get)
+      apt_run install "$@"
+      ;;
+    dnf)
+      dnf -y install "$@"
+      ;;
+    yum)
+      yum -y install "$@"
+      ;;
+    zypper)
+      zypper --non-interactive --gpg-auto-import-keys install --auto-agree-with-licenses "$@"
+      ;;
+    pacman)
+      pacman -S --noconfirm --needed "$@"
+      ;;
+    apk)
+      apk add --no-cache "$@"
+      ;;
+  esac
+}
+
+htpasswd_package_name() {
+  local pkg_manager=""
+  pkg_manager="$(detect_package_manager)"
+
+  case "${pkg_manager}" in
+    apt-get|zypper|apk)
+      printf '%s\n' "apache2-utils"
+      ;;
+    dnf|yum)
+      printf '%s\n' "httpd-tools"
+      ;;
+    pacman)
+      printf '%s\n' "apache"
+      ;;
+  esac
+}
+
+install_runtime_dependencies() {
+  pkg_install curl "$(htpasswd_package_name)"
+}
+
+install_compose_plugin_if_needed() {
+  local pkg_manager=""
+  pkg_manager="$(detect_package_manager)"
+
+  case "${pkg_manager}" in
+    apt-get|dnf|yum)
+      pkg_update
+      pkg_install docker-compose-plugin
+      ;;
+    zypper)
+      pkg_install docker-compose-switch || pkg_install docker-compose || true
+      ;;
+    pacman)
+      pkg_install docker-compose || true
+      ;;
+    apk)
+      pkg_install docker-cli-compose || true
+      ;;
+  esac
+}
+
+enable_and_start_service() {
+  local service_name="$1"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now "${service_name}" >/dev/null 2>&1 || systemctl restart "${service_name}" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if command -v rc-update >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1; then
+    rc-update add "${service_name}" default >/dev/null 2>&1 || true
+    rc-service "${service_name}" start >/dev/null 2>&1 || rc-service "${service_name}" restart >/dev/null 2>&1 || true
+    return 0
+  fi
+  if command -v service >/dev/null 2>&1; then
+    service "${service_name}" start >/dev/null 2>&1 || service "${service_name}" restart >/dev/null 2>&1 || true
+  fi
+}
+
 detect_docker_repo_distribution() {
   local dist="debian"
   local id_like=""
-  if [ -r /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    case "${ID:-}" in
-      ubuntu|debian)
-        dist="${ID}"
-        ;;
-      *)
-        id_like="${ID_LIKE:-}"
-        if echo " ${id_like} " | grep -qi ' ubuntu '; then
-          dist="ubuntu"
-        elif echo " ${id_like} " | grep -qi ' debian '; then
-          dist="debian"
-        fi
-        ;;
-    esac
-  fi
+  load_os_release
+  case "${OS_RELEASE_ID:-}" in
+    ubuntu|debian)
+      dist="${OS_RELEASE_ID}"
+      ;;
+    *)
+      id_like="${OS_RELEASE_ID_LIKE:-}"
+      if echo " ${id_like} " | grep -qi ' ubuntu '; then
+        dist="ubuntu"
+      elif echo " ${id_like} " | grep -qi ' debian '; then
+        dist="debian"
+      fi
+      ;;
+  esac
   printf '%s' "$dist"
 }
 
 detect_docker_repo_codename() {
   local codename=""
-  if [ -r /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    codename="${VERSION_CODENAME:-}"
-  fi
+  load_os_release
+  codename="${OS_RELEASE_VERSION_CODENAME:-}"
   if [ -z "$codename" ] && command -v lsb_release >/dev/null 2>&1; then
     codename="$(lsb_release -cs 2>/dev/null || true)"
   fi
@@ -136,15 +333,39 @@ detect_docker_repo_codename() {
   printf '%s' "$codename"
 }
 
-run_docker_installer_inline() {
-  local action="$1"
+detect_rpm_repo_distribution() {
+  local repo_dist="rhel"
+  load_os_release
+
+  case "${OS_RELEASE_ID:-}" in
+    fedora)
+      repo_dist="fedora"
+      ;;
+    centos)
+      repo_dist="centos"
+      ;;
+    rhel|rocky|almalinux|ol)
+      repo_dist="rhel"
+      ;;
+    *)
+      if echo " ${OS_RELEASE_ID_LIKE:-} " | grep -Eqi ' fedora '; then
+        repo_dist="fedora"
+      elif [ "$(detect_package_manager)" = "yum" ]; then
+        repo_dist="centos"
+      fi
+      ;;
+  esac
+  printf '%s' "$repo_dist"
+}
+
+configure_docker_repo_for_apt() {
   local dist=""
   local codename=""
 
   dist="$(detect_docker_repo_distribution)"
   codename="$(detect_docker_repo_codename)"
 
-  echo "[install] 使用内置 Docker 安装流程（${dist}/${codename}）..."
+  echo "[install] 配置 Docker 官方仓库（${dist}/${codename}）..."
   apt_run install ca-certificates curl gnupg lsb-release apt-transport-https
   install -m 0755 -d /etc/apt/keyrings
   rm -f /etc/apt/keyrings/docker.gpg
@@ -156,14 +377,118 @@ deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] h
 EOF_DOCKER_REPO
 
   apt_run update
+}
+
+configure_docker_repo_for_rpm() {
+  local pkg_manager=""
+  local repo_dist=""
+  local repo_url=""
+
+  pkg_manager="$(detect_package_manager)"
+  repo_dist="$(detect_rpm_repo_distribution)"
+  repo_url="https://download.docker.com/linux/${repo_dist}/docker-ce.repo"
+
+  echo "[install] 配置 Docker RPM 软件源（${repo_dist}）..."
+
+  if [ "${pkg_manager}" = "dnf" ]; then
+    pkg_install dnf-plugins-core
+    if dnf config-manager --help 2>/dev/null | grep -q -- '--add-repo'; then
+      dnf config-manager --add-repo "${repo_url}"
+    else
+      dnf config-manager addrepo --from-repofile="${repo_url}"
+    fi
+  else
+    pkg_install yum-utils
+    yum-config-manager --add-repo "${repo_url}"
+  fi
+}
+
+install_docker_engine_inline() {
+  local pkg_manager=""
+  pkg_manager="$(detect_package_manager)"
+
+  case "${pkg_manager}" in
+    apt-get)
+      configure_docker_repo_for_apt
+      apt_run install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      ;;
+    dnf)
+      configure_docker_repo_for_rpm
+      dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      ;;
+    yum)
+      configure_docker_repo_for_rpm
+      yum -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      ;;
+    zypper)
+      pkg_update
+      pkg_install docker
+      pkg_install docker-compose docker-compose-switch || pkg_install docker-compose || true
+      ;;
+    pacman)
+      pkg_update
+      pacman -S --noconfirm docker docker-compose
+      ;;
+    apk)
+      pkg_update
+      pkg_install docker docker-cli-compose
+      ;;
+  esac
+}
+
+update_docker_engine_inline() {
+  local pkg_manager=""
+  pkg_manager="$(detect_package_manager)"
+
+  case "${pkg_manager}" in
+    apt-get)
+      configure_docker_repo_for_apt
+      apt_run install --only-upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || \
+        apt_run install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      ;;
+    dnf)
+      configure_docker_repo_for_rpm
+      dnf -y upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || \
+        dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      ;;
+    yum)
+      configure_docker_repo_for_rpm
+      yum -y update docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || \
+        yum -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      ;;
+    zypper)
+      pkg_update
+      zypper --non-interactive update docker docker-compose docker-compose-switch || \
+        (pkg_install docker && (pkg_install docker-compose docker-compose-switch || pkg_install docker-compose || true))
+      ;;
+    pacman)
+      pkg_update
+      pacman -S --noconfirm docker docker-compose
+      ;;
+    apk)
+      apk upgrade docker docker-cli-compose || pkg_install docker docker-cli-compose
+      ;;
+  esac
+}
+
+run_docker_installer_inline() {
+  local action="$1"
+  local pkg_manager=""
+
+  ensure_supported_host
+  pkg_manager="$(detect_package_manager)"
+
+  echo "[install] 使用内置 Docker 安装流程（${pkg_manager}）..."
   if [ "$action" = "install" ]; then
-    apt_run install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    install_docker_engine_inline
   elif command -v docker >/dev/null 2>&1; then
-    apt_run install --only-upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    update_docker_engine_inline
   else
     echo "[install] update 模式下未检测到 Docker，自动回退 install。"
-    apt_run install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    install_docker_engine_inline
   fi
+
+  enable_and_start_service docker
 }
 
 is_interactive_terminal() {
@@ -412,11 +737,7 @@ ensure_docker_runtime() {
     fi
   fi
 
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable --now docker >/dev/null 2>&1 || true
-  else
-    service docker start >/dev/null 2>&1 || true
-  fi
+  enable_and_start_service docker
 }
 
 detect_compose_bin() {
@@ -425,10 +746,11 @@ detect_compose_bin() {
   elif command -v docker-compose >/dev/null 2>&1; then
     echo "docker-compose"
   else
-    apt_run update
-    apt_run install docker-compose-plugin || true
+    install_compose_plugin_if_needed || true
     if docker compose version >/dev/null 2>&1; then
       echo "docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+      echo "docker-compose"
     else
       echo "docker-compose"
     fi
@@ -572,7 +894,7 @@ update_credentials_flow() {
   user="${user:-admin}"
   pass="$(read_password_non_empty '请输入新密码: ')"
 
-  apt_run install apache2-utils
+  pkg_install "$(htpasswd_package_name)"
   htpasswd -nbB "$user" "$pass" > "$HT_FLARE"
   echo "[menu] 凭据已更新，正在重启 edge..."
   run_manage restart
@@ -1071,7 +1393,7 @@ perform_install() {
   compose_bin="$(detect_compose_bin)"
 
   # ===== 依赖 =====
-  apt_run install apache2-utils curl
+  install_runtime_dependencies
 
   # ===== 目录与凭据（bcrypt htpasswd） =====
   mkdir -p "${APP_DIR}" "${NGX_DIR}"
@@ -1162,6 +1484,8 @@ parse_args() {
 
 main() {
   parse_args "$@"
+
+  ensure_supported_host
 
   if [ "$QUICK_MODE" = "true" ]; then
     quick_install_flow

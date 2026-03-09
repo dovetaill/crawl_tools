@@ -37,9 +37,22 @@ Internet --> edge (BasicAuth, :8081) --> flaresolverr (:8191)
 
 ### 3.1 前置条件
 
-- Debian/Ubuntu 系统。
+- Linux 系统，当前原生支持这些包管理器族：
+  - `apt`
+  - `dnf`
+  - `yum`
+  - `zypper`
+  - `pacman`
+  - `apk`
 - 使用 `root`，或当前用户具备 `sudo` 能力。
 - 已克隆本仓库并进入目录：`/home/wwwroot/crawl_tools`。
+
+说明：
+
+- Linux 原生支持：`apt` / `dnf` / `yum` / `zypper` / `pacman` / `apk`
+- `Windows` 当前不在支持范围内。
+- `macOS` 当前不支持原生安装；脚本会做环境检测并给出提示，然后退出。若必须在 macOS 使用，请自行准备 Docker Desktop 并手动部署。
+- macOS 仅做环境检测与提示，不执行原生安装流程。
 
 ### 3.2 菜单模式（推荐）
 
@@ -305,6 +318,11 @@ cat /opt/aio-proxy/.env
 
 - 若同目录存在 `install_docker.sh`：优先调用外部安装器。
 - 若不存在：自动回退到 `install.sh` 内置 Docker 安装流程（单脚本模式可直接运行）。
+- Linux 下会按包管理器族自动分流：
+  - `apt`：Docker 官方 APT 仓库
+  - `dnf` / `yum`：Docker 官方 RPM 仓库
+  - `zypper` / `pacman` / `apk`：优先使用发行版原生 Docker 包
+- `macOS` 只做检测与提示，不执行原生安装。
 
 可单独调用：
 
