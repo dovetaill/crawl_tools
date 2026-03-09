@@ -8,7 +8,7 @@ APP_DIR="/opt/aio-proxy"
 NGX_DIR="${APP_DIR}/nginx"
 HT_FLARE="${NGX_DIR}/htpasswd_flaresolverr"
 ENV_FILE="${APP_DIR}/.env"
-TZ_DEFAULT="Europe/Berlin"
+TZ_FALLBACK_DEFAULT="UTC"
 REMOTE_INSTALL_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install.sh"
 REMOTE_DOCKER_INSTALL_URL="https://raw.githubusercontent.com/dovetaill/crawl_tools/refs/heads/master/install_docker.sh"
 SCRIPT_PATH="${BASH_SOURCE[0]-}"
@@ -41,6 +41,40 @@ ASSUME_YES="false"
 FORCE_UPDATE_DOCKER="false"
 QUICK_MODE="false"
 POSITIONAL_ARGS=()
+
+detect_host_timezone() {
+  local tz=""
+  local zoneinfo_path=""
+
+  zoneinfo_path="$(readlink -f /etc/localtime 2>/dev/null || true)"
+  case "${zoneinfo_path}" in
+    /usr/share/zoneinfo/*)
+      tz="${zoneinfo_path#/usr/share/zoneinfo/}"
+      if [ -n "${tz}" ]; then
+        printf '%s\n' "${tz}"
+        return 0
+      fi
+      ;;
+  esac
+
+  if [ -r /etc/timezone ]; then
+    tz="$(tr -d '[:space:]' < /etc/timezone 2>/dev/null || true)"
+    if [ -n "${tz}" ]; then
+      printf '%s\n' "${tz}"
+      return 0
+    fi
+  fi
+
+  if command -v timedatectl >/dev/null 2>&1; then
+    tz="$(timedatectl show --property=Timezone --value 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ -n "${tz}" ] && [ "${tz}" != "n/a" ]; then
+      printf '%s\n' "${tz}"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "${TZ_FALLBACK_DEFAULT}"
+}
 
 # ===== APT 锁等待 & 包管理辅助 =====
 apt_wait_lock() {
@@ -774,9 +808,11 @@ menu_mode() {
 
 write_env_file() {
   local flare_port="$1"
+  local detected_tz=""
+  detected_tz="$(detect_host_timezone)"
   cat > "${ENV_FILE}" <<EOF_ENV
 # 全局
-TZ=${TZ_DEFAULT}
+TZ=${detected_tz}
 
 # 对外端口（Nginx 暴露）
 FLARE_PUBLIC_PORT=${flare_port}

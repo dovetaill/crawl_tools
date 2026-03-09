@@ -166,7 +166,7 @@ install.sh
 ### 4.2 默认值（脚本生成）
 
 - 安装目录：`/opt/aio-proxy`
-- 默认时区：`Europe/Berlin`
+- 默认时区：自动继承当前机器时区（检测失败回退 `UTC`）
 - 容器内部端口：`8191`
 - Compose 网络名：`aio-proxy-net`
 

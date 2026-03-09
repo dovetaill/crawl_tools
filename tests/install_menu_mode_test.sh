@@ -230,4 +230,19 @@ if ! rg -n '^\./manage\.sh uninstall$' ./README.md >/dev/null 2>&1; then
 fi
 pass "README documents manage menu parity and uninstall"
 
+# Test 18: installer should inherit host timezone instead of hardcoding Europe/Berlin
+if rg -n '^TZ_DEFAULT="Europe/Berlin"' ./install.sh >/dev/null 2>&1; then
+  fail "install.sh still hardcodes Europe/Berlin as default timezone"
+fi
+if ! rg -n '^detect_host_timezone\(\)' ./install.sh >/dev/null 2>&1; then
+  fail "missing host timezone detection helper"
+fi
+if ! rg -n 'detected_tz="\$\(detect_host_timezone\)"' ./install.sh >/dev/null 2>&1; then
+  fail "write_env_file is not deriving TZ from host timezone helper"
+fi
+if ! rg -n '自动继承当前机器时区|检测失败回退 `UTC`' ./README.md >/dev/null 2>&1; then
+  fail "README is not documenting host timezone inheritance"
+fi
+pass "installer defaults to host timezone inheritance"
+
 echo "All tests passed"
